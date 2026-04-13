@@ -1,9 +1,80 @@
 # EthicGuard-API — repo rules
 
-Go backend for EthicGuard. Read [../CLAUDE.md](../CLAUDE.md) and
-[ARCHITECTURE.md](ARCHITECTURE.md) before making non-trivial changes.
+Go backend for the EthicGuard QA intelligence platform. Read this entire file
+and [ARCHITECTURE.md](ARCHITECTURE.md) before making non-trivial changes.
 
-## Hard rules (zero-retention)
+---
+
+## Project context (applies to both EthicGuard repos)
+
+EthicGuard is a Jira-native QA intelligence product: a bridge between Jira and
+Anthropic Claude. It lives in two side-by-side repos:
+
+- **EthicGuard-API** (this repo) — Go backend, Postgres, Claude Agent SDK
+- **EthicGuard-UI** — Atlassian Forge app, TypeScript
+
+The same cross-repo rules below are duplicated into the UI repo's `CLAUDE.md`
+so each side is self-contained when opened independently.
+
+### The non-negotiable rule
+
+**Zero customer-data retention.** EthicGuard-API must never persist Jira issue
+content (titles, descriptions, AC text, comments, attachments). Allowed in
+Postgres: ids, issue keys, severity/score, anchors (`{field, start, end}`),
+stable message keys, audit metadata. Anything else is a bug.
+
+If a feature seems to need stored issue text, the right answer is almost
+always "store an anchor + message key and re-fetch live on render." See
+[ARCHITECTURE.md](ARCHITECTURE.md).
+
+### Stack is locked
+
+Do not propose alternatives unless explicitly asked:
+
+- LLM: **Claude only**, via the Anthropic SDK / Claude Agent SDK patterns.
+  Default model `claude-sonnet-4-6`; heavy model `claude-opus-4-6`, opt-in per policy.
+- API language: **Go 1.23+**.
+- Jira integration: **Atlassian Forge** (Jira Cloud only).
+- Persistence: **Postgres 16**, single managed instance. No Redis, no extra stores.
+- Async: in-process Go worker pool over a Postgres job table. No external queue.
+- Hosting: single container on Fly.io / Railway / Render.
+
+Out of scope: multi-LLM abstraction, Jira Data Center / Server, custom
+embeddings, fine-tuning, Marketplace billing, SSO beyond Forge identity.
+
+### Cross-repo conventions
+
+- Conventional commits (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`, `ci:`).
+- Branch names: `type/short-description`.
+- The OpenAPI spec at `api/openapi.yaml` is the source of truth for the API
+  contract. UI types are generated from it — never hand-edit both sides.
+- A breaking API change bumps the path prefix (`/v1` → `/v2`); never silently
+  reshape an existing endpoint.
+
+### Skills and agents to use
+
+| When you're doing… | Use |
+|---|---|
+| Writing or debugging Anthropic SDK code, prompt caching, structured output | **`claude-api` skill** |
+| Reviewing changed code for reuse, simplicity, dead code | **`simplify` skill** |
+| Capturing a non-obvious lesson after a tricky fix | **`/learn`** (writes to `memory/`) |
+| Open-ended search across the repo | **`Explore` subagent** |
+| Designing the implementation for a non-trivial feature | **`Plan` subagent** |
+| Questions about Forge, Anthropic SDK, or Claude Code itself | **`claude-code-guide` subagent** |
+| Looking up library docs (pgx, goose, anthropic-sdk-go, Forge) | **`context7` MCP** — prefer over web search |
+
+### Working agreements
+
+- Before claiming a task complete, run the repo's tests and lint. If you can't,
+  say so explicitly.
+- Never edit a committed migration. Add a new one.
+- Never log prompt bodies or normalized issue payloads above debug level.
+- Never commit `.env`, secrets, or anything matching `*credentials*`.
+- Project-specific lessons go in `memory/` via `/learn`.
+
+---
+
+## Repo-specific: zero-retention enforcement at the package boundary
 
 Enforced at the package boundary, not just by convention:
 
