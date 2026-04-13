@@ -1,0 +1,23 @@
+# binaries
+/bin/
+/dist/
+ethicguard-api
+ethicguard-api.exe
+
+# env
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# test & coverage
+*.out
+coverage.*
+
+# OS
+.DS_Store
+Thumbs.db
