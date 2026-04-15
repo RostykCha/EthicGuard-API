@@ -1,8 +1,9 @@
-# binaries
+# binaries — anchored so they only match the compiled binary at repo root,
+# not the `cmd/ethicguard-api` source directory or any other path component.
 /bin/
 /dist/
-ethicguard-api
-ethicguard-api.exe
+/ethicguard-api
+/ethicguard-api.exe
 
 # env
 .env
