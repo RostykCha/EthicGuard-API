@@ -22,7 +22,7 @@ type Config struct {
 func Load() (*Config, error) {
 	cfg := &Config{
 		Env:                 getenv("ETHICGUARD_ENV", "dev"),
-		HTTPAddr:            getenv("ETHICGUARD_HTTP_ADDR", ":8080"),
+		HTTPAddr:            httpAddrFromEnv(),
 		LogLevel:            getenv("ETHICGUARD_LOG_LEVEL", "info"),
 		DatabaseURL:         os.Getenv("ETHICGUARD_DATABASE_URL"),
 		AnthropicAPIKey:     os.Getenv("ETHICGUARD_ANTHROPIC_API_KEY"),
@@ -56,4 +56,17 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// httpAddrFromEnv resolves the listen address. ETHICGUARD_HTTP_ADDR wins; if
+// unset, fall back to PORT (Render and most managed PaaS inject this); finally
+// default to :8080 for local dev.
+func httpAddrFromEnv() string {
+	if v, ok := os.LookupEnv("ETHICGUARD_HTTP_ADDR"); ok && v != "" {
+		return v
+	}
+	if v, ok := os.LookupEnv("PORT"); ok && v != "" {
+		return ":" + v
+	}
+	return ":8080"
 }

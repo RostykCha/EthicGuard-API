@@ -41,3 +41,31 @@ func TestLoadRejectsBadConcurrency(t *testing.T) {
 		t.Fatal("expected error for concurrency=0")
 	}
 }
+
+func TestLoadHonorsRenderPortEnvVar(t *testing.T) {
+	t.Setenv("ETHICGUARD_ENV", "dev")
+	t.Setenv("ETHICGUARD_HTTP_ADDR", "")
+	t.Setenv("PORT", "10000")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.HTTPAddr != ":10000" {
+		t.Errorf("HTTPAddr = %q, want :10000 (from PORT env var)", cfg.HTTPAddr)
+	}
+}
+
+func TestExplicitHTTPAddrBeatsPort(t *testing.T) {
+	t.Setenv("ETHICGUARD_ENV", "dev")
+	t.Setenv("ETHICGUARD_HTTP_ADDR", ":9999")
+	t.Setenv("PORT", "10000")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.HTTPAddr != ":9999" {
+		t.Errorf("HTTPAddr = %q, want :9999 (explicit beats PORT)", cfg.HTTPAddr)
+	}
+}

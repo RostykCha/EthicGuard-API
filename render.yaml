@@ -1,0 +1,48 @@
+# Render Blueprint for EthicGuard-API
+# Go backend at https://api.ethicguard.ai
+#
+# How to use:
+#   1. Push this file to GitHub (already done if you're reading this).
+#   2. In Render: New + → Blueprint → connect this repo.
+#   3. Render reads this file and creates the web service + Postgres database.
+#   4. Render will prompt you for the secret env vars marked `sync: false`
+#      (ETHICGUARD_ANTHROPIC_API_KEY) — paste your Anthropic API key.
+#   5. Add the custom domain `api.ethicguard.ai` in the web service's
+#      Settings → Custom Domains, then add the DNS record Render shows you
+#      over at Porkbun.
+
+databases:
+  - name: ethicguard-pg
+    plan: starter
+    databaseName: ethicguard
+    user: ethicguard
+    postgresMajorVersion: "16"
+
+services:
+  - type: web
+    runtime: docker
+    name: ethicguard-api
+    plan: starter
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /v1/health
+    autoDeploy: true
+    envVars:
+      - key: ETHICGUARD_ENV
+        value: prod
+      - key: ETHICGUARD_LOG_LEVEL
+        value: info
+      - key: ETHICGUARD_JWT_AUDIENCE
+        value: ethicguard-api
+      - key: ETHICGUARD_ANTHROPIC_MODEL
+        value: claude-sonnet-4-6
+      - key: ETHICGUARD_ANTHROPIC_MODEL_HEAVY
+        value: claude-opus-4-6
+      - key: ETHICGUARD_WORKER_CONCURRENCY
+        value: "4"
+      - key: ETHICGUARD_DATABASE_URL
+        fromDatabase:
+          name: ethicguard-pg
+          property: connectionString
+      - key: ETHICGUARD_ANTHROPIC_API_KEY
+        sync: false
