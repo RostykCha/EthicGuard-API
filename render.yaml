@@ -13,7 +13,7 @@
 
 databases:
   - name: ethicguard-pg
-    plan: starter
+    plan: basic-256mb
     databaseName: ethicguard
     user: ethicguard
     postgresMajorVersion: "16"
