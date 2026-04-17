@@ -11,7 +11,7 @@ import (
 
 func TestHealthEndpoint(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	router := NewRouter(logger)
+	router := NewRouter(Deps{Logger: logger})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
 	rec := httptest.NewRecorder()

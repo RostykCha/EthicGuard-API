@@ -17,6 +17,10 @@ type Config struct {
 	AnthropicModelHeavy string
 	WorkerConcurrency   int
 	JWTAudience         string
+	// InstallerSecret is the pre-shared HS256 signing key for Forge lifecycle
+	// webhooks. The Forge app and the API both know this; it bootstraps auth
+	// before any installation-specific shared secret exists.
+	InstallerSecret string
 }
 
 func Load() (*Config, error) {
@@ -29,6 +33,7 @@ func Load() (*Config, error) {
 		AnthropicModel:      getenv("ETHICGUARD_ANTHROPIC_MODEL", "claude-sonnet-4-6"),
 		AnthropicModelHeavy: getenv("ETHICGUARD_ANTHROPIC_MODEL_HEAVY", "claude-opus-4-6"),
 		JWTAudience:         getenv("ETHICGUARD_JWT_AUDIENCE", "ethicguard-api"),
+		InstallerSecret:     os.Getenv("ETHICGUARD_INSTALLER_SECRET"),
 	}
 
 	concurrency, err := strconv.Atoi(getenv("ETHICGUARD_WORKER_CONCURRENCY", "4"))
@@ -46,6 +51,9 @@ func Load() (*Config, error) {
 		}
 		if cfg.AnthropicAPIKey == "" {
 			return nil, errors.New("ETHICGUARD_ANTHROPIC_API_KEY is required outside dev")
+		}
+		if cfg.InstallerSecret == "" {
+			return nil, errors.New("ETHICGUARD_INSTALLER_SECRET is required outside dev")
 		}
 	}
 	return cfg, nil
