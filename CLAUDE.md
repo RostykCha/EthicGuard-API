@@ -71,6 +71,12 @@ embeddings, fine-tuning, Marketplace billing, SSO beyond Forge identity.
 - Never log prompt bodies or normalized issue payloads above debug level.
 - Never commit `.env`, secrets, or anything matching `*credentials*`.
 - Project-specific lessons go in `memory/` via `/learn`.
+- **Keep `EthicGuard-API/ARCHITECTURE.md` diagrams current.** Any change that
+  alters deploy topology, request flow, auth flow, data model, or LLM wiring
+  must update the diagrams at the top of that file in the same commit. Before
+  replacing a diagram, move the outgoing version into the `## Evolution`
+  section at the bottom with today's date and a one-line reason. Never delete
+  past diagrams — they are the historical record of how the system grew.
 
 ---
 

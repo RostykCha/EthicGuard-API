@@ -12,24 +12,247 @@ through a Forge app, sends it to an Anthropic Claude model via the Claude
 Agent SDK, and writes back structured QA findings into its own small store.
 The UI renders those findings inside the Jira issue view.
 
-## High-level diagram
+## Architecture diagrams
+
+The canonical picture of EthicGuard as it runs today (2026-04-19). Three
+views, each capturing a different concern. Older versions of these diagrams
+are preserved in the [Evolution](#evolution) section at the bottom of this
+file — never deleted, so the history of how the system grew stays readable.
+
+> **Rule:** any change that alters deploy topology, request flow, auth flow,
+> data model, or LLM wiring must update these diagrams in the same commit,
+> and move the outgoing version into the Evolution section with today's date
+> and a one-line reason. This rule is also duplicated into each repo's
+> `CLAUDE.md` so future sessions enforce it.
+
+### Deploy topology
+
+Where everything runs and who talks to whom.
 
 ```
- Jira Cloud
-    │  (issue view, issue action "Run QA Review")
-    ▼
- EthicGuard-UI  (Forge app, Node 20, TypeScript)
-    │  resolvers run inside the Forge runtime
-    │  ├─ read Jira issue via @forge/api  (scope: product.jira:read)
-    │  └─ POST analysis request → EthicGuard-API  (signed JWT, cloudId claim)
-    ▼
- EthicGuard-API  (Go, stateless, single binary)
-    ├─ http handlers  → validate JWT, enqueue job, return jobId
-    ├─ workers        → pull job, run Claude Agent SDK, normalize findings
-    ├─ policy engine  → project/company QA policies gate/score findings
-    ├─ postgres       → installations, projects, policies, jobs, findings, audit
-    └─ Claude API     → Sonnet 4.6 default, Opus 4.6 opt-in per policy
+                    ┌──────────────────────────────────────────┐
+                    │              End users                    │
+                    │  (browsers: devs, Jira admins, visitors)  │
+                    └───────┬────────────────────────┬──────────┘
+                            │                        │
+            ┌───────────────┤                        ├──────────────────┐
+            │ marketing     │                        │ working in Jira  │
+            ▼               │                        ▼                  │
+   ┌──────────────────┐     │              ┌─────────────────────────┐  │
+   │  ethicguard.ai   │     │              │ ethicguard.atlassian.net│  │
+   │  www.*           │     │              │ (Jira Cloud site)       │  │
+   │                  │     │              └────────────┬────────────┘  │
+   │ Render static    │     │                           │ invokes        │
+   │ site             │     │                           ▼                │
+   │ (Astro 5 +       │     │              ┌─────────────────────────┐  │
+   │  Tailwind 3,     │     │              │ Atlassian Forge runtime │◄─┘
+   │  global CDN)     │     │              │ EthicGuard-UI, Node 22  │
+   └──────────────────┘     │              │                         │
+                            │              │ modules                 │
+                            │              │  ├─ jira:issuePanel     │
+                            │              │  ├─ jira:issueAction    │
+                            │              │  ├─ jira:issueContext   │
+                            │              │  ├─ jira:projectSetting │
+                            │              │  └─ graph Custom UI     │
+                            │              │                         │
+                            │              │ resolvers               │
+                            │              │  ├─ runQaReview         │
+                            │              │  ├─ getJobStatus        │
+                            │              │  └─ getIssueGraph       │
+                            │              │                         │
+                            │              │ triggers (lifecycle)    │
+                            │              │  ├─ installed           │
+                            │              │  └─ uninstalled         │
+                            │              │                         │
+                            │              │ per-install storage     │
+                            │              │  └─ shared HS256 secret │
+                            │              └────────────┬────────────┘
+                            │                           │ HTTPS
+                            │                           │ Bearer HS256 JWT
+                            │                           │ (cloudId claim)
+                            │                           ▼
+                            │           ┌──────────────────────────────────┐
+                            │           │ api.ethicguard.ai                │
+                            │           │ Render Docker web service        │
+                            │           │ ethicguard-api-cvvk, Frankfurt   │
+                            │           │ Go 1.25 + net/http               │
+                            │           │                                  │
+                            │           │ middleware                       │
+                            │           │  └─ HS256 JWT verify + install   │
+                            │           │     lookup by cloudId            │
+                            │           │                                  │
+                            │           │ routes                           │
+                            │           │  ├─ GET  /v1/health              │
+                            │           │  ├─ GET  /v1/version             │
+                            │           │  ├─ POST /v1/installations/      │
+                            │           │  │         lifecycle (installer  │
+                            │           │  │         JWT auth)             │
+                            │           │  └─ POST /v1/analysis (authed)   │
+                            │           └────────┬──────────────────┬──────┘
+                            │                    │ pgx              │ HTTPS
+                            │                    ▼                  ▼
+                            │       ┌─────────────────────┐  ┌───────────────┐
+                            │       │ Postgres 16         │  │ Anthropic API │
+                            │       │ ethicguard-pg-cvvk  │  │ Claude        │
+                            │       │ Frankfurt           │  │ Sonnet 4.6    │
+                            │       │                     │  │               │
+                            │       │ current tables used:│  │ prompt cached │
+                            │       │  └─ installations   │  │ on system     │
+                            │       │     (cloud_id +     │  │ prompt        │
+                            │       │      shared_secret, │  │ (ephemeral)   │
+                            │       │      NO issue text) │  │               │
+                            │       └─────────────────────┘  └───────────────┘
+                            │
+                            ▼ DNS
+                    ┌──────────────────────────────┐
+                    │ Porkbun registrar             │
+                    │ + Cloudflare-backed DNS       │
+                    │  ALIAS @ → ethicguard-web     │
+                    │  CNAME www → ethicguard-web   │
+                    │  CNAME api → ethicguard-api-  │
+                    │              cvvk             │
+                    └──────────────────────────────┘
 ```
+
+### Request flow — "Run QA Review"
+
+The core product path: user → Jira → Forge → API → Claude → findings.
+
+```
+User clicks "Run QA Review" in Jira
+  │
+  ▼
+Forge runtime invokes resolver runQaReview
+  │
+  ├─► @forge/api.asApp().requestJira(/rest/api/3/issue/{key})
+  │   (scope: read:jira-work)
+  │
+  ├─► normalizeIssue(raw)                    in-memory only, never persisted
+  │
+  ├─► storage.get(sharedSecret)              per-install Forge storage
+  │
+  ├─► mintApiToken(cloudId)                  HS256, aud=ethicguard-api,
+  │                                          ttl=300s, signed with shared secret
+  │
+  └─► POST https://api.ethicguard.ai/v1/analysis
+      Authorization: Bearer <JWT>
+      body: { issueKey, projectKey, kind: "ac_quality",
+              payload: NormalizedIssue }
+      │
+      ▼
+      auth.Middleware
+      ├─ peekCloudID(token)                   unverified cloudId peek
+      ├─ installations.GetByCloudID(cloudID)  Postgres SELECT
+      ├─ auth.Verify(token, inst.SharedSecret, AudienceAPI)
+      └─ ctx = WithValue(ctx, *Installation)
+      │
+      ▼
+      AnalysisHandler.ServeHTTP
+      ├─ decode json.Body → analysis.AnalysisRequest
+      └─ analysis.Run(ctx, llm, req)
+          ├─ formatUserContent(payload)       markdown, in-memory
+          ├─ llm.Analyze(ctx, systemPrompt, userContent)
+          │   └─► anthropic.Client.Messages.New
+          │       ├─ model:     claude-sonnet-4-6
+          │       ├─ maxTokens: 4096
+          │       ├─ system:    QA policy (CacheControl: ephemeral)
+          │       └─ user:      serialized issue content
+          │   ◄── JSON array of findings in a text block
+          ├─ stripCodeFence(raw)
+          └─ json.Unmarshal → []Finding
+      │
+      ▼
+      writeJSON(200, { findings: Finding[] })
+  │
+  ▼
+Forge runtime returns findings to the Jira UI Kit view
+  │
+  ▼
+User sees structured findings rendered in the EthicGuard panel.
+```
+
+### Install / uninstall flow
+
+How a freshly installed Forge app establishes a per-installation shared
+secret with the API before it can make any authenticated call.
+
+```
+forge install  (or Marketplace install from a Jira admin)
+  │
+  ▼
+Atlassian fires   avi:forge:installed:app
+  │
+  ▼
+Forge trigger lifecycle-installed → onInstalled(payload)
+  │
+  ├─► crypto.randomBytes(32).toString("hex")        new 32-byte shared secret
+  ├─► storage.set(sharedSecret, <hex>)              per-install Forge storage
+  ├─► mintInstallerToken(cloudId)                   HS256, aud=ethicguard-installer,
+  │                                                 signed with INSTALLER_SECRET
+  │                                                 (pre-shared Forge variable)
+  │
+  └─► POST https://api.ethicguard.ai/v1/installations/lifecycle
+      Authorization: Bearer <installer JWT>
+      body: { event: "install", cloudId, sharedSecret: <hex> }
+      │
+      ▼
+      LifecycleHandler
+      ├─ auth.Verify(token, ETHICGUARD_INSTALLER_SECRET, AudienceInstaller)
+      ├─ require claims.CloudID == body.cloudId
+      ├─ installations.Upsert(cloudId, sharedSecret)   Postgres ON CONFLICT UPDATE
+      └─ writeJSON(200, { status: "installed" })
+
+Subsequent resolver calls now have a working per-install shared secret on
+both sides; normal JWT auth path kicks in.
+
+─────────────────────────────────────────────────────────────────────
+
+forge uninstall  (or user removes the app from Jira)
+  │
+  ▼
+Atlassian fires   avi:forge:uninstalled:app
+  │
+  ▼
+Forge trigger lifecycle-uninstalled → onUninstalled(payload)
+  │
+  ├─► storage.delete(sharedSecret)                   best-effort cleanup
+  └─► POST /v1/installations/lifecycle (installer JWT)
+      body: { event: "uninstall", cloudId }
+      │
+      ▼
+      LifecycleHandler
+      ├─ installations.DeleteByCloudID(cloudID)
+      │   → CASCADE drops every projects / jobs / findings /
+      │     conflicts / audit_log row tied to this cloudId.
+      └─ writeJSON(200, { status: "uninstalled" })
+
+Zero-retention guarantee: after uninstall, nothing about this installation
+remains in the database.
+```
+
+### Status of the pipeline (as of 2026-04-19)
+
+Implemented and deployed:
+
+- Marketing site at `ethicguard.ai` (Astro, Render static)
+- Forge UI v3.3.0 on `ethicguard.atlassian.net` — all modules render
+- `api.ethicguard.ai` on Render Docker with managed Postgres in Frankfurt
+- Auth: HS256 JWTs + installations table + lifecycle webhook
+- `/v1/analysis`: synchronous call to Claude Sonnet 4.6, returns findings
+  directly (no job queue yet)
+- `installations` table populated on install, cascaded on uninstall
+
+Designed but not yet implemented:
+
+- Job queue + worker pool (`jobs` table schema exists; API currently runs
+  analysis synchronously in-handler)
+- Project / company policy evaluation (`policies`, `projects` tables exist;
+  a single hardcoded system prompt is used for now)
+- `findings` / `conflicts` / `audit_log` persistence (schema exists, no
+  writes happen yet — the handler returns findings directly without
+  persisting)
+- Cross-issue conflict detection (needs linked-issue fetch + larger context)
+- OpenAPI spec generation and type-safe UI client
 
 ## The zero-retention rule
 
@@ -177,3 +400,40 @@ variables. See `Dockerfile` and `.env.example`.
 - SSO beyond Forge's built-in identity
 - Custom embeddings / fine-tuned models
 - Billing and Marketplace listing
+
+## Evolution
+
+Old architecture diagrams live here, newest first. Any change that replaces a
+diagram above must move the outgoing version here with a date and a one-line
+reason. Diagrams are append-only — the history of how the system grew is
+worth more than a clean slate.
+
+### v0 — initial plan (2026-04-13)
+
+The pre-implementation sketch from the scaffold day. Captured the product
+intent but predated every actual deploy:
+
+- wrote "Node 20" for the Forge runtime (now Node 22)
+- described an asynchronous worker-pool analysis pipeline with a Postgres
+  job queue; the real MVP skipped that and went synchronous
+- didn't name the hosts (`ethicguard.ai`, `api.ethicguard.ai`), because
+  the marketing site + domain + Render deploy didn't exist yet
+- didn't include the graph module, issue-context module, or lifecycle
+  trigger — those all came later
+
+```
+ Jira Cloud
+    │  (issue view, issue action "Run QA Review")
+    ▼
+ EthicGuard-UI  (Forge app, Node 20, TypeScript)
+    │  resolvers run inside the Forge runtime
+    │  ├─ read Jira issue via @forge/api  (scope: product.jira:read)
+    │  └─ POST analysis request → EthicGuard-API  (signed JWT, cloudId claim)
+    ▼
+ EthicGuard-API  (Go, stateless, single binary)
+    ├─ http handlers  → validate JWT, enqueue job, return jobId
+    ├─ workers        → pull job, run Claude Agent SDK, normalize findings
+    ├─ policy engine  → project/company QA policies gate/score findings
+    ├─ postgres       → installations, projects, policies, jobs, findings, audit
+    └─ Claude API     → Sonnet 4.6 default, Opus 4.6 opt-in per policy
+```

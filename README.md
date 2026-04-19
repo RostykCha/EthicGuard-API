@@ -13,6 +13,31 @@ findings to the [EthicGuard-UI](../EthicGuard-UI) Forge app.
 - **Async:** in-process worker pool backed by a Postgres job table
 - **Auth:** Forge-minted JWTs, per-installation shared secret
 
+## Architecture at a glance
+
+```
+Browser ──► ethicguard.ai  (Render static site, Astro)
+Browser ──► ethicguard.atlassian.net ──► Forge UI (Node 22)
+                                              │
+                                              │ HS256 JWT
+                                              ▼
+                                         api.ethicguard.ai
+                                         (Render Docker, Frankfurt)
+                                              │
+                                    ┌─────────┴──────────┐
+                                    ▼                    ▼
+                              Postgres 16          Claude Sonnet 4.6
+                              (installations       (Anthropic API)
+                               only, no issue
+                               text)
+```
+
+Full topology, request flow, install flow, and evolution history live in
+[ARCHITECTURE.md](ARCHITECTURE.md). **Any change that touches deploy topology,
+request flow, auth, data model, or LLM wiring must update those diagrams in
+the same commit** — the rule is also spelled out in every repo's
+[CLAUDE.md](CLAUDE.md).
+
 ## Zero-retention guarantee
 
 EthicGuard-API **never** persists Jira issue titles, bodies, descriptions,
