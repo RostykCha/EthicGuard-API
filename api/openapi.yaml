@@ -465,7 +465,7 @@ components:
 
     ProjectSettings:
       type: object
-      required: [projectKey, confidenceThreshold, thresholdOverrides]
+      required: [projectKey, confidenceThreshold, thresholdOverrides, testedIssueTypes]
       properties:
         projectKey: { type: string }
         confidenceThreshold:
@@ -481,15 +481,31 @@ components:
           description: |
             Category-specific overrides learned from dismissals (Phase 2 #7).
             Empty by default; populated by the learning loop.
+        testedIssueTypes:
+          type: array
+          items:
+            type: string
+            pattern: "^[0-9]{1,32}$"
+          description: |
+            Jira issue-type ids in scope for QA analysis on this project.
+            Configured from the EthicGuard Configuration page. Empty array
+            means "no types selected yet."
 
     ProjectSettingsUpdate:
+      description: |
+        Partial update. Any field may be omitted. At least one field is
+        required.
       type: object
-      required: [confidenceThreshold]
       properties:
         confidenceThreshold:
           type: integer
           minimum: 0
           maximum: 100
+        testedIssueTypes:
+          type: array
+          items:
+            type: string
+            pattern: "^[0-9]{1,32}$"
 
     Persona:
       type: string

@@ -16,6 +16,7 @@ type Project struct {
 	ProjectKey          string
 	ConfidenceThreshold int
 	ThresholdOverrides  map[string]int // category → override threshold (0-100)
+	TestedIssueTypes    []string       // Jira issue-type ids in scope for analysis
 }
 
 // Projects repository over the `projects` table.
@@ -43,14 +44,14 @@ func (r *Projects) UpsertByKey(ctx context.Context, installationID int64, projec
 // GetByKey returns the full project row (including thresholds).
 func (r *Projects) GetByKey(ctx context.Context, installationID int64, projectKey string) (*Project, error) {
 	const q = `
-		SELECT id, installation_id, project_key, confidence_threshold, threshold_overrides
+		SELECT id, installation_id, project_key, confidence_threshold, threshold_overrides, tested_issue_types
 		FROM projects
 		WHERE installation_id = $1 AND project_key = $2
 	`
 	var p Project
 	var overridesRaw []byte
 	err := r.Store.Pool.QueryRow(ctx, q, installationID, projectKey).Scan(
-		&p.ID, &p.InstallationID, &p.ProjectKey, &p.ConfidenceThreshold, &overridesRaw,
+		&p.ID, &p.InstallationID, &p.ProjectKey, &p.ConfidenceThreshold, &overridesRaw, &p.TestedIssueTypes,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -72,14 +73,14 @@ func (r *Projects) GetByKey(ctx context.Context, installationID int64, projectKe
 // GetByID returns the full project row by id.
 func (r *Projects) GetByID(ctx context.Context, id int64) (*Project, error) {
 	const q = `
-		SELECT id, installation_id, project_key, confidence_threshold, threshold_overrides
+		SELECT id, installation_id, project_key, confidence_threshold, threshold_overrides, tested_issue_types
 		FROM projects
 		WHERE id = $1
 	`
 	var p Project
 	var overridesRaw []byte
 	err := r.Store.Pool.QueryRow(ctx, q, id).Scan(
-		&p.ID, &p.InstallationID, &p.ProjectKey, &p.ConfidenceThreshold, &overridesRaw,
+		&p.ID, &p.InstallationID, &p.ProjectKey, &p.ConfidenceThreshold, &overridesRaw, &p.TestedIssueTypes,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -132,6 +133,26 @@ func (r *Projects) SetOverrides(ctx context.Context, projectID int64, overrides 
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+	return nil
+}
+
+// SetTestedIssueTypes replaces the list of Jira issue-type ids in scope for
+// the given project. Upserts so the UI can configure types before any
+// analysis has ever run against the project. Each id is a Jira issue-type
+// id string (e.g. "10001"); no free text is accepted.
+func (r *Projects) SetTestedIssueTypes(ctx context.Context, installationID int64, projectKey string, issueTypeIDs []string) error {
+	if issueTypeIDs == nil {
+		issueTypeIDs = []string{}
+	}
+	const q = `
+		INSERT INTO projects (installation_id, project_key, tested_issue_types)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (installation_id, project_key) DO UPDATE
+		SET tested_issue_types = EXCLUDED.tested_issue_types
+	`
+	if _, err := r.Store.Pool.Exec(ctx, q, installationID, projectKey, issueTypeIDs); err != nil {
+		return fmt.Errorf("projects set tested issue types: %w", err)
 	}
 	return nil
 }

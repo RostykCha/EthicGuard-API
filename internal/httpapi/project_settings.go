@@ -23,10 +23,15 @@ type projectSettingsResponse struct {
 	ProjectKey          string         `json:"projectKey"`
 	ConfidenceThreshold int            `json:"confidenceThreshold"`
 	ThresholdOverrides  map[string]int `json:"thresholdOverrides"`
+	TestedIssueTypes    []string       `json:"testedIssueTypes"`
 }
 
+// projectSettingsUpdate accepts partial updates. Fields are pointers so the
+// caller can update one dimension (threshold OR tested issue types) without
+// clobbering the other.
 type projectSettingsUpdate struct {
-	ConfidenceThreshold int `json:"confidenceThreshold"`
+	ConfidenceThreshold *int      `json:"confidenceThreshold,omitempty"`
+	TestedIssueTypes    *[]string `json:"testedIssueTypes,omitempty"`
 }
 
 func (h *ProjectSettingsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -62,6 +67,7 @@ func (h *ProjectSettingsHandler) serveGet(w http.ResponseWriter, r *http.Request
 				ProjectKey:          projectKey,
 				ConfidenceThreshold: 0,
 				ThresholdOverrides:  map[string]int{},
+				TestedIssueTypes:    []string{},
 			})
 			return
 		}
@@ -73,6 +79,7 @@ func (h *ProjectSettingsHandler) serveGet(w http.ResponseWriter, r *http.Request
 		ProjectKey:          p.ProjectKey,
 		ConfidenceThreshold: p.ConfidenceThreshold,
 		ThresholdOverrides:  p.ThresholdOverrides,
+		TestedIssueTypes:    nonNilStrings(p.TestedIssueTypes),
 	})
 }
 
@@ -82,36 +89,93 @@ func (h *ProjectSettingsHandler) servePut(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
-	if req.ConfidenceThreshold < 0 || req.ConfidenceThreshold > 100 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "confidenceThreshold must be 0-100"})
+	if req.ConfidenceThreshold == nil && req.TestedIssueTypes == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no fields to update"})
 		return
 	}
-	if err := h.Projects.UpdateThreshold(r.Context(), inst.ID, projectKey, req.ConfidenceThreshold); err != nil {
-		h.Logger.Error("update threshold failed", "err", err, "project_key", projectKey)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "persist failed"})
-		return
-	}
-	if h.Audit != nil {
-		if err := h.Audit.Log(r.Context(), inst.ID, "", "project.threshold_updated", projectKey, map[string]any{
-			"confidence_threshold": req.ConfidenceThreshold,
-		}); err != nil {
-			h.Logger.Warn("audit log failed", "err", err)
+
+	if req.ConfidenceThreshold != nil {
+		v := *req.ConfidenceThreshold
+		if v < 0 || v > 100 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "confidenceThreshold must be 0-100"})
+			return
+		}
+		if err := h.Projects.UpdateThreshold(r.Context(), inst.ID, projectKey, v); err != nil {
+			h.Logger.Error("update threshold failed", "err", err, "project_key", projectKey)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "persist failed"})
+			return
+		}
+		if h.Audit != nil {
+			if err := h.Audit.Log(r.Context(), inst.ID, "", "project.threshold_updated", projectKey, map[string]any{
+				"confidence_threshold": v,
+			}); err != nil {
+				h.Logger.Warn("audit log failed", "err", err)
+			}
 		}
 	}
-	// Reload so the response reflects merged state (including learned overrides).
+
+	if req.TestedIssueTypes != nil {
+		ids := sanitizeIssueTypeIDs(*req.TestedIssueTypes)
+		if err := h.Projects.SetTestedIssueTypes(r.Context(), inst.ID, projectKey, ids); err != nil {
+			h.Logger.Error("update tested issue types failed", "err", err, "project_key", projectKey)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "persist failed"})
+			return
+		}
+		if h.Audit != nil {
+			if err := h.Audit.Log(r.Context(), inst.ID, "", "project.tested_issue_types_updated", projectKey, map[string]any{
+				"count": len(ids),
+			}); err != nil {
+				h.Logger.Warn("audit log failed", "err", err)
+			}
+		}
+	}
+
 	p, err := h.Projects.GetByKey(r.Context(), inst.ID, projectKey)
 	if err != nil {
-		// Should be impossible right after an upsert; return best-effort body.
-		writeJSON(w, http.StatusOK, projectSettingsResponse{
-			ProjectKey:          projectKey,
-			ConfidenceThreshold: req.ConfidenceThreshold,
-			ThresholdOverrides:  map[string]int{},
-		})
+		h.Logger.Error("reload after update failed", "err", err, "project_key", projectKey)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "reload failed"})
 		return
 	}
 	writeJSON(w, http.StatusOK, projectSettingsResponse{
 		ProjectKey:          p.ProjectKey,
 		ConfidenceThreshold: p.ConfidenceThreshold,
 		ThresholdOverrides:  p.ThresholdOverrides,
+		TestedIssueTypes:    nonNilStrings(p.TestedIssueTypes),
 	})
+}
+
+// sanitizeIssueTypeIDs filters incoming ids to Jira's numeric-id shape so a
+// client can't smuggle issue content into the column. Jira issue-type ids
+// are decimal strings (e.g. "10001"); anything else is dropped. Dedupes.
+func sanitizeIssueTypeIDs(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := map[string]struct{}{}
+	for _, s := range in {
+		if s == "" || len(s) > 32 {
+			continue
+		}
+		ok := true
+		for _, c := range s {
+			if c < '0' || c > '9' {
+				ok = false
+				break
+			}
+		}
+		if !ok {
+			continue
+		}
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+func nonNilStrings(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
