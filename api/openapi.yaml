@@ -1,0 +1,587 @@
+openapi: 3.0.3
+info:
+  title: EthicGuard API
+  version: 1.0.0
+  description: |
+    EthicGuard-API is a Jira-native QA intelligence backend. The Forge app
+    (EthicGuard-UI) calls these endpoints over HTTPS with a per-installation
+    HS256 JWT (audience `ethicguard-api`, cloudId claim).
+
+    Zero-retention: no Jira issue content is stored on this side. Findings
+    carry a stable message key + params + anchor; human text is rendered by
+    an in-repo catalog at read time.
+
+servers:
+  - url: https://api.ethicguard.ai
+    description: Production
+  - url: http://localhost:8080
+    description: Local dev
+
+security:
+  - forgeJwt: []
+
+paths:
+  /v1/health:
+    get:
+      summary: Liveness probe.
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok] }
+
+  /v1/version:
+    get:
+      summary: Build version + commit SHA.
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { type: string }
+                  commit: { type: string }
+
+  /v1/installations/lifecycle:
+    post:
+      summary: Forge lifecycle webhook (install / uninstall).
+      description: |
+        Authenticated by the pre-shared installer secret, *not* the per-
+        installation JWT. Bootstraps the per-install shared secret the
+        normal `forgeJwt` flow then uses.
+      security:
+        - installerJwt: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LifecycleRequest"
+      responses:
+        "200":
+          description: Lifecycle event handled.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+
+  /v1/analysis:
+    post:
+      summary: Enqueue a QA analysis job.
+      description: |
+        Returns `202 Accepted` with a job id. The normalized issue payload
+        lives only in the worker's memory and is never persisted. Poll
+        `GET /v1/analysis/{jobId}` for progress and findings.
+
+        Set `escalate: true` to route this run through the heavy model
+        (claude-opus-4-6). Heavy runs cost more and should be opt-in per
+        user action, not on every submission.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnalysisRequest"
+      responses:
+        "202":
+          description: Job accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnqueueResponse"
+        "400":
+          description: Invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid JWT.
+        "503":
+          description: Worker pool busy; retry later.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/analysis/{jobId}:
+    get:
+      summary: Poll analysis job status and findings.
+      description: |
+        Returns partial findings + a rolling summary while `status` is
+        `running`, then the complete list when `status` becomes `done`.
+        Each finding carries its recorded `action` (if any) so the UI can
+        render the accept/dismiss state inline.
+
+        The `role` query selects which catalog variant renders each
+        finding's `message` field: `pm`, `qa`, `dev`, or omitted for the
+        neutral default.
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema:
+            type: string
+            description: Job id (decimal string).
+        - in: query
+          name: role
+          required: false
+          schema:
+            type: string
+            enum: [pm, qa, dev]
+          description: |
+            Selects the role-aware text variant. Unknown values fall back to
+            the neutral default, so a client passing anything else is safe.
+      responses:
+        "200":
+          description: Current status; findings stream in as worker progresses.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalysisStatus"
+        "400":
+          description: Invalid jobId.
+        "401":
+          description: Missing or invalid JWT.
+        "404":
+          description: No such job for this installation.
+
+  /v1/projects/{projectKey}/settings:
+    get:
+      summary: Get project settings (confidence threshold + overrides).
+      parameters:
+        - in: path
+          name: projectKey
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Settings (defaults returned for unseen projects).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectSettings"
+        "401":
+          description: Missing or invalid JWT.
+    put:
+      summary: Update the project-wide confidence threshold.
+      parameters:
+        - in: path
+          name: projectKey
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectSettingsUpdate"
+      responses:
+        "200":
+          description: Settings after write.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectSettings"
+        "400":
+          description: Threshold must be 0-100.
+        "401":
+          description: Missing or invalid JWT.
+
+  /v1/preferences:
+    get:
+      summary: Get the current user's persona preference.
+      parameters:
+        - in: query
+          name: accountId
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Preference (empty persona if unset).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserPreference"
+        "400":
+          description: Missing accountId.
+        "401":
+          description: Missing or invalid JWT.
+    put:
+      summary: Set or clear the user's persona preference.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserPreferenceUpdate"
+      responses:
+        "200":
+          description: Preference after write.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserPreference"
+        "400":
+          description: Invalid persona or missing accountId.
+        "401":
+          description: Missing or invalid JWT.
+
+  /v1/digests/latest:
+    get:
+      summary: Latest weekly cross-issue digest for the caller's installation.
+      parameters:
+        - in: query
+          name: role
+          required: false
+          schema:
+            type: string
+            enum: [pm, qa, dev]
+          description: Selects catalog variant for rendered messages.
+      responses:
+        "200":
+          description: Digest payload, or an empty-state object when none exists.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/Digest"
+                  - $ref: "#/components/schemas/DigestEmpty"
+        "401":
+          description: Missing or invalid JWT.
+
+  /v1/findings/{id}/action:
+    post:
+      summary: Record accept/dismiss action on a finding.
+      description: |
+        Upserts the user's response to a single finding. The action and reason
+        are strict enums — free text is rejected. At most one action is kept
+        per finding; subsequent calls replace the prior choice.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, format: int64 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FindingActionRequest"
+      responses:
+        "200":
+          description: Action recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FindingActionResponse"
+        "400":
+          description: Invalid action or reason.
+        "401":
+          description: Missing or invalid JWT.
+        "404":
+          description: Finding not found or not owned by this installation.
+
+components:
+  securitySchemes:
+    forgeJwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: HS256 per-installation token (aud=ethicguard-api).
+    installerJwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: HS256 token signed with the pre-shared installer secret (aud=ethicguard-installer).
+
+  schemas:
+    LifecycleRequest:
+      type: object
+      required: [event, cloudId]
+      properties:
+        event: { type: string, enum: [install, uninstall] }
+        cloudId: { type: string }
+        sharedSecret:
+          type: string
+          description: Required when event=install; ignored otherwise.
+
+    AnalysisKind:
+      type: string
+      enum: [ac_quality]
+
+    IssuePayload:
+      type: object
+      required: [key]
+      description: |
+        Normalized Jira issue content — lives only in the API's memory for
+        one analysis call and is never persisted.
+      properties:
+        key: { type: string, example: "PROJ-123" }
+        summary: { type: string }
+        description: { type: string }
+        acceptanceCriteria: { type: string }
+        linkedIssueKeys:
+          type: array
+          items: { type: string }
+
+    AnalysisRequest:
+      type: object
+      required: [issueKey, projectKey, payload]
+      properties:
+        issueKey: { type: string, example: "PROJ-123" }
+        projectKey: { type: string, example: "PROJ" }
+        kind:
+          $ref: "#/components/schemas/AnalysisKind"
+        escalate:
+          type: boolean
+          default: false
+          description: If true, run this job on the heavy model (claude-opus-4-6).
+        payload:
+          $ref: "#/components/schemas/IssuePayload"
+
+    RationaleTag:
+      type: string
+      enum:
+        - assumption_gap
+        - spec_conflict
+        - missing_negative
+        - unstated_behavior
+        - weak_precondition
+      description: |
+        Optional label signalling WHY a finding is non-obvious. Omitted for
+        findings that are straightforward lints.
+
+    EnqueueResponse:
+      type: object
+      required: [jobId]
+      properties:
+        jobId: { type: string, example: "42" }
+
+    Anchor:
+      type: object
+      required: [field]
+      properties:
+        field:
+          type: string
+          enum: [summary, description, acceptanceCriteria]
+        start: { type: integer, minimum: 0 }
+        end: { type: integer, minimum: 0 }
+
+    Severity:
+      type: string
+      enum: [info, low, medium, high]
+
+    FindingCategory:
+      type: string
+      enum: [ambiguity, missing_edge_case, untestable, missing_negative_case, incomplete]
+
+    Finding:
+      type: object
+      required: [id, category, severity, score, anchor, messageKey, message]
+      properties:
+        id: { type: integer, format: int64 }
+        category:
+          $ref: "#/components/schemas/FindingCategory"
+        severity:
+          $ref: "#/components/schemas/Severity"
+        score: { type: integer, minimum: 0, maximum: 100 }
+        anchor:
+          $ref: "#/components/schemas/Anchor"
+        messageKey:
+          type: string
+          description: Stable key resolved from the API's in-repo catalog.
+          example: "ambiguity.vague_quantifier"
+        params:
+          type: object
+          additionalProperties: { type: string }
+          description: Non-content metadata (field names, enums, counts); never user-authored text.
+        message:
+          type: string
+          description: Human text rendered from messageKey + params by the server.
+        rationaleTag:
+          $ref: "#/components/schemas/RationaleTag"
+        action:
+          $ref: "#/components/schemas/FindingActionState"
+
+    FindingActionState:
+      type: object
+      required: [action, createdAt]
+      properties:
+        action:
+          type: string
+          enum: [accept, dismiss]
+        reason:
+          type: string
+          enum: [false_positive, wont_fix, duplicate, noise, other]
+        createdAt:
+          type: string
+          format: date-time
+
+    FindingActionRequest:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [accept, dismiss]
+        reason:
+          type: string
+          enum: [false_positive, wont_fix, duplicate, noise, other]
+          description: Optional dismiss reason. Ignored for accept.
+        actorAccountId:
+          type: string
+          description: Jira account id recording the action.
+
+    FindingActionResponse:
+      type: object
+      required: [id, findingId, action, createdAt]
+      properties:
+        id: { type: integer, format: int64 }
+        findingId: { type: integer, format: int64 }
+        action: { type: string, enum: [accept, dismiss] }
+        reason: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    FindingsSummary:
+      type: object
+      required: [total, high, medium, low, info]
+      properties:
+        total: { type: integer, minimum: 0 }
+        high: { type: integer, minimum: 0 }
+        medium: { type: integer, minimum: 0 }
+        low: { type: integer, minimum: 0 }
+        info: { type: integer, minimum: 0 }
+
+    ProjectSettings:
+      type: object
+      required: [projectKey, confidenceThreshold, thresholdOverrides]
+      properties:
+        projectKey: { type: string }
+        confidenceThreshold:
+          type: integer
+          minimum: 0
+          maximum: 100
+        thresholdOverrides:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+            maximum: 100
+          description: |
+            Category-specific overrides learned from dismissals (Phase 2 #7).
+            Empty by default; populated by the learning loop.
+
+    ProjectSettingsUpdate:
+      type: object
+      required: [confidenceThreshold]
+      properties:
+        confidenceThreshold:
+          type: integer
+          minimum: 0
+          maximum: 100
+
+    Persona:
+      type: string
+      enum: [pm, qa, dev]
+
+    UserPreference:
+      type: object
+      required: [accountId]
+      properties:
+        accountId: { type: string }
+        persona:
+          $ref: "#/components/schemas/Persona"
+
+    UserPreferenceUpdate:
+      type: object
+      required: [accountId, persona]
+      properties:
+        accountId: { type: string }
+        persona:
+          oneOf:
+            - $ref: "#/components/schemas/Persona"
+            - type: string
+              enum: [""]
+              description: Empty string clears the preference.
+
+    DigestFinding:
+      type: object
+      required: [id, issueKey, category, severity, score, messageKey, message]
+      properties:
+        id: { type: integer, format: int64 }
+        issueKey: { type: string }
+        category:
+          $ref: "#/components/schemas/FindingCategory"
+        severity:
+          $ref: "#/components/schemas/Severity"
+        score: { type: integer, minimum: 0, maximum: 100 }
+        messageKey: { type: string }
+        params:
+          type: object
+          additionalProperties: { type: string }
+        message: { type: string }
+        rationaleTag:
+          $ref: "#/components/schemas/RationaleTag"
+
+    Digest:
+      type: object
+      required: [id, periodStart, periodEnd, findings]
+      properties:
+        id: { type: integer, format: int64 }
+        periodStart: { type: string, format: date-time }
+        periodEnd: { type: string, format: date-time }
+        findings:
+          type: array
+          items:
+            $ref: "#/components/schemas/DigestFinding"
+
+    DigestEmpty:
+      type: object
+      required: [empty]
+      properties:
+        empty:
+          type: boolean
+          enum: [true]
+
+    AnalysisStatus:
+      type: object
+      required: [jobId, issueKey, status, createdAt]
+      properties:
+        jobId: { type: string }
+        issueKey: { type: string }
+        status:
+          type: string
+          enum: [queued, running, done, failed]
+        errorCode:
+          type: string
+          description: Stable snake_case error code, present only when status=failed.
+          example: "llm_timeout"
+        summary:
+          $ref: "#/components/schemas/FindingsSummary"
+        findings:
+          type: array
+          description: |
+            Findings streamed as the worker inserts them. Populated
+            progressively while `status=running`; complete when `status=done`.
+          items:
+            $ref: "#/components/schemas/Finding"
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
