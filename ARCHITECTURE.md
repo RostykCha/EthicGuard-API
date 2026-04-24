@@ -14,7 +14,7 @@ The UI renders those findings inside the Jira issue view.
 
 ## Architecture diagrams
 
-The canonical picture of EthicGuard as it runs today (2026-04-20). Three
+The canonical picture of EthicGuard as it runs today (2026-04-19). Three
 views, each capturing a different concern. Older versions of these diagrams
 are preserved in the [Evolution](#evolution) section at the bottom of this
 file — never deleted, so the history of how the system grew stays readable.
@@ -87,15 +87,7 @@ Where everything runs and who talks to whom.
                             │           │  ├─ POST /v1/installations/      │
                             │           │  │         lifecycle (installer  │
                             │           │  │         JWT auth)             │
-                            │           │  ├─ POST /v1/analysis (authed)   │
-                            │           │  │     → 202 { jobId }           │
-                            │           │  └─ GET  /v1/analysis/{jobId}    │
-                            │           │        (authed, tenant-scoped)   │
-                            │           │                                  │
-                            │           │ in-process worker pool            │
-                            │           │  └─ N goroutines drain buffered  │
-                            │           │     chan, call Claude, persist   │
-                            │           │     findings + audit_log         │
+                            │           │  └─ POST /v1/analysis (authed)   │
                             │           └────────┬──────────────────┬──────┘
                             │                    │ pgx              │ HTTPS
                             │                    ▼                  ▼
@@ -104,14 +96,11 @@ Where everything runs and who talks to whom.
                             │       │ ethicguard-pg-cvvk  │  │ Claude        │
                             │       │ Frankfurt           │  │ Sonnet 4.6    │
                             │       │                     │  │               │
-                            │       │ tables written:     │  │ prompt cached │
-                            │       │  ├─ installations   │  │ on system     │
-                            │       │  ├─ projects        │  │ prompt        │
-                            │       │  ├─ jobs (queue)    │  │ (ephemeral)   │
-                            │       │  ├─ findings        │  │               │
-                            │       │  └─ audit_log       │  │               │
-                            │       │ NO issue text in    │  │               │
-                            │       │ any row.            │  │               │
+                            │       │ current tables used:│  │ prompt cached │
+                            │       │  └─ installations   │  │ on system     │
+                            │       │     (cloud_id +     │  │ prompt        │
+                            │       │      shared_secret, │  │ (ephemeral)   │
+                            │       │      NO issue text) │  │               │
                             │       └─────────────────────┘  └───────────────┘
                             │
                             ▼ DNS
@@ -127,9 +116,7 @@ Where everything runs and who talks to whom.
 
 ### Request flow — "Run QA Review"
 
-The core product path: user → Jira → Forge → API → worker → Claude → findings.
-Two resolvers run on the Forge side (enqueue + poll); the worker pool runs
-Claude out of band so the POST returns inside the Forge 25s resolver budget.
+The core product path: user → Jira → Forge → API → Claude → findings.
 
 ```
 User clicks "Run QA Review" in Jira
@@ -141,77 +128,48 @@ Forge runtime invokes resolver runQaReview
   │   (scope: read:jira-work)
   │
   ├─► normalizeIssue(raw)                    in-memory only, never persisted
+  │
   ├─► storage.get(sharedSecret)              per-install Forge storage
-  ├─► mintApiToken(cloudId)                  HS256, aud=ethicguard-api, ttl=300s
+  │
+  ├─► mintApiToken(cloudId)                  HS256, aud=ethicguard-api,
+  │                                          ttl=300s, signed with shared secret
   │
   └─► POST https://api.ethicguard.ai/v1/analysis
-      body: { issueKey, projectKey, kind, payload }
+      Authorization: Bearer <JWT>
+      body: { issueKey, projectKey, kind: "ac_quality",
+              payload: NormalizedIssue }
       │
       ▼
-      auth.Middleware  (verifies JWT, attaches *Installation to ctx)
+      auth.Middleware
+      ├─ peekCloudID(token)                   unverified cloudId peek
+      ├─ installations.GetByCloudID(cloudID)  Postgres SELECT
+      ├─ auth.Verify(token, inst.SharedSecret, AudienceAPI)
+      └─ ctx = WithValue(ctx, *Installation)
       │
       ▼
       AnalysisHandler.ServeHTTP
-      ├─ projects.UpsertByKey(cloudId, projectKey) → projectID
-      ├─ jobs.Enqueue(installID, projectID, issueKey, kind) → jobID (status=queued)
-      ├─ dispatcher.Dispatch({jobID, installID, *req})  non-blocking chan send
-      │                                          ── payload lives ONLY in chan memory
-      │                                          ── if chan full: mark row failed('busy'),
-      │                                             return 503
-      └─ writeJSON(202, { jobId: "<jobID>" })
+      ├─ decode json.Body → analysis.AnalysisRequest
+      └─ analysis.Run(ctx, llm, req)
+          ├─ formatUserContent(payload)       markdown, in-memory
+          ├─ llm.Analyze(ctx, systemPrompt, userContent)
+          │   └─► anthropic.Client.Messages.New
+          │       ├─ model:     claude-sonnet-4-6
+          │       ├─ maxTokens: 4096
+          │       ├─ system:    QA policy (CacheControl: ephemeral)
+          │       └─ user:      serialized issue content
+          │   ◄── JSON array of findings in a text block
+          ├─ stripCodeFence(raw)
+          └─ json.Unmarshal → []Finding
+      │
+      ▼
+      writeJSON(200, { findings: Finding[] })
   │
   ▼
-Forge resolver returns { jobId } to the Jira UI Kit panel, which stores it
-in per-issue Forge storage and begins polling.
-
- ┌───────────────────────────────────────────── worker pool (same binary) ──┐
- │  N = ETHICGUARD_WORKER_CONCURRENCY goroutines consume from Worker.ch     │
- │                                                                          │
- │  for work := range ch {                                                  │
- │    jobs.MarkRunning(work.JobID)                                          │
- │    findings, err := analysis.Run(ctx, llm, work.Request)                 │
- │      ├─ formatUserContent(payload)   in-memory markdown                  │
- │      └─ llm.Analyze(systemPrompt + key-enum contract, userContent)       │
- │          ↳ claude-sonnet-4-6, prompt-cached system block                 │
- │          ↳ structured JSON: {category, severity, score, anchor,          │
- │                              messageKey, params}                         │
- │    for each finding: catalog.Resolve(key, params) VALIDATE               │
- │    for each finding: findings.Insert(jobID, key, params, anchor)         │
- │    jobs.MarkDone(jobID)                                                  │
- │    audit.Log("analysis.completed", {job_id, findings_count, duration})   │
- │  }                                                                       │
- │                                                                          │
- │  on failure: jobs.MarkFailed(jobID, stableCode)  [llm_timeout, llm_error │
- │                                                   catalog_reject, db_write]│
- │  sweeper goroutine:  queued rows older than 2m → failed('payload_lost')  │
- └──────────────────────────────────────────────────────────────────────────┘
-
- Poll loop, driven by the issue panel:
+Forge runtime returns findings to the Jira UI Kit view
   │
   ▼
- GET /v1/analysis/{jobId}
-  auth.Middleware  (same JWT path)
-  │
-  ▼
-  AnalysisStatusHandler.ServeHTTP
-  ├─ jobs.GetByIDForInstallation(jobId, installID)   tenant-scoped lookup
-  ├─ if status=done: findings.ListByJob(jobId)
-  │                   catalog.Resolve(key, params)  → human text at READ time
-  └─ writeJSON(200, { status, findings?, errorCode?, createdAt, ... })
-  │
-  ▼
- Issue panel renders cards; stops polling when status ∈ {done, failed}.
+User sees structured findings rendered in the EthicGuard panel.
 ```
-
-Zero-retention invariants in this flow:
-
-- `jobs` row stores only ids, issue key, status, error *code* — never text.
-- `findings` row stores category + severity + score + anchor + `message_key` + `params`.
-  `params` values are validated against a whitelist pattern, rejecting
-  anything that looks like free-form sentence.
-- The issue payload exists only in the POST handler's memory, the channel
-  buffer, and the worker goroutine's stack — never Postgres, never a log
-  line above debug.
 
 ### Install / uninstall flow
 
@@ -272,7 +230,7 @@ Zero-retention guarantee: after uninstall, nothing about this installation
 remains in the database.
 ```
 
-### Status of the pipeline (as of 2026-04-20)
+### Status of the pipeline (as of 2026-04-19)
 
 Implemented and deployed:
 
@@ -280,28 +238,21 @@ Implemented and deployed:
 - Forge UI v3.3.0 on `ethicguard.atlassian.net` — all modules render
 - `api.ethicguard.ai` on Render Docker with managed Postgres in Frankfurt
 - Auth: HS256 JWTs + installations table + lifecycle webhook
-- **Async `/v1/analysis`**: enqueues a job and returns 202 with `jobId` inside
-  Forge's 25s resolver budget. In-process worker pool consumes an in-memory
-  channel and calls Claude Sonnet 4.6 out of band.
-- **`GET /v1/analysis/{jobId}`**: tenant-scoped status poll; `done` responses
-  include findings rendered via the `internal/catalog` message catalog.
-- **Findings + audit persistence**: `jobs`, `findings`, and `audit_log` rows
-  written per analysis run. Nothing carries Jira issue text — only message
-  keys, enum params, anchors, and timestamps.
-- **`internal/catalog`**: embedded Go map of `message_key → template(default,
-  pm?, qa?, dev?)`, with a param-value whitelist that rejects free text.
-- **OpenAPI 3.0 spec** at `api/openapi.yaml` covers every route.
+- `/v1/analysis`: synchronous call to Claude Sonnet 4.6, returns findings
+  directly (no job queue yet)
 - `installations` table populated on install, cascaded on uninstall
 
 Designed but not yet implemented:
 
+- Job queue + worker pool (`jobs` table schema exists; API currently runs
+  analysis synchronously in-handler)
 - Project / company policy evaluation (`policies`, `projects` tables exist;
   a single hardcoded system prompt is used for now)
-- Cross-issue conflict detection (`conflicts` table schema exists; needs
-  linked-issue fetch + multi-issue LLM context)
-- Role-aware catalog variants (PM/QA/Dev texts); today the `default` variant
-  is always rendered
-- UI client generated from OpenAPI spec (Phase 1 UI work)
+- `findings` / `conflicts` / `audit_log` persistence (schema exists, no
+  writes happen yet — the handler returns findings directly without
+  persisting)
+- Cross-issue conflict detection (needs linked-issue fetch + larger context)
+- OpenAPI spec generation and type-safe UI client
 
 ## The zero-retention rule
 
@@ -456,38 +407,6 @@ Old architecture diagrams live here, newest first. Any change that replaces a
 diagram above must move the outgoing version here with a date and a one-line
 reason. Diagrams are append-only — the history of how the system grew is
 worth more than a clean slate.
-
-### v1 — synchronous analysis MVP (superseded 2026-04-20)
-
-Replaced by the async job-queue flow above when the Forge panel's 25s
-resolver budget made a synchronous round-trip through Claude untenable at
-real-world issue sizes. The request flow below was the shipping shape from
-2026-04-13 through 2026-04-19.
-
-```
-User clicks "Run QA Review" in Jira
-  │
-  ▼
-Forge resolver runQaReview  →  POST /v1/analysis
-  │                                  │
-  │                                  ▼
-  │                           AnalysisHandler.ServeHTTP (sync)
-  │                             ├─ analysis.Run(ctx, llm, req)
-  │                             │   └─ llm.Analyze(...)   blocks the request
-  │                             └─ writeJSON(200, { findings: Finding[] })
-  │
-  ▼
-Forge resolver returns findings directly to the UI panel.
-```
-
-Notable shortcuts in v1 vs. today:
-
-- No `jobs` row written; `findings` never persisted.
-- The LLM returned a free-text `Finding.Message`. The UI rendered it
-  verbatim, which would have violated the zero-retention rule the moment
-  we added persistence — the switch to `message_key + params + catalog`
-  closed that gap before the first `findings.Insert` shipped.
-- No worker pool, no janitor, no error-code classification.
 
 ### v0 — initial plan (2026-04-13)
 
