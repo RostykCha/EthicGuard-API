@@ -40,3 +40,21 @@ type IssuePayload struct {
 type AnalysisResponse struct {
 	Findings []Finding `json:"findings"`
 }
+
+// RunOptions carries per-project knobs the worker passes into analysis.Run.
+// These are derived from the project's stored ProjectConfig at enqueue time
+// and stashed in the in-memory job bus alongside the payload, so the worker
+// doesn't need a store dependency.
+//
+// SeverityThreshold drops any finding strictly below this rank before the
+// label is decided (e.g. threshold "medium" → findings with severity "info"
+// and "low" are filtered out). Empty string means "use the default behaviour"
+// — keep every finding the model returned.
+//
+// PromptAddendum is appended to the analysis system prompt as an extra,
+// non-cached system block. Empty string means "no addendum, plain system
+// prompt only" (which preserves the prompt-cache hit).
+type RunOptions struct {
+	SeverityThreshold string
+	PromptAddendum    string
+}

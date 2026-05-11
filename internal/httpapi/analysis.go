@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethicguard/ethicguard-api/internal/analysis"
 	"github.com/ethicguard/ethicguard-api/internal/auth"
+	"github.com/ethicguard/ethicguard-api/internal/jobs"
 	"github.com/ethicguard/ethicguard-api/internal/store"
 )
 
@@ -31,16 +32,17 @@ type ProjectsRepoFull interface {
 	Upsert(ctx context.Context, installationID int64, projectKey string) (int64, error)
 }
 
-// PayloadEnqueuer is what the handler uses to hand the in-memory issue
-// payload off to the worker pool. Defined as an interface so tests can fake.
+// PayloadEnqueuer is what the handler uses to hand the in-memory job entry
+// off to the worker pool. Defined as an interface so tests can fake.
 type PayloadEnqueuer interface {
-	Put(jobID int64, p analysis.IssuePayload)
+	Put(jobID int64, e jobs.Entry)
 }
 
 // AnalysisHandler serves POST /v1/analysis — enqueue an AC analysis job.
 // The Forge UI (or trigger) sends the normalized issue payload; we register
-// a job in Postgres, hand the payload to the worker via the in-memory bus,
-// and return the jobId immediately. Polling happens via GET /v1/analysis/{id}.
+// a job in Postgres, hand the payload + per-project run options to the
+// worker via the in-memory bus, and return the jobId immediately. Polling
+// happens via GET /v1/analysis/{id}.
 //
 // Zero-retention: the payload is held only in process memory until the
 // worker takes it; Postgres only carries ids, kind, status, label, anchors.
@@ -87,6 +89,13 @@ func (h *AnalysisHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if !cfg.AgentEnabled {
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "agent_disabled",
+			"hint":  "EthicGuard AC Reviewer is turned off for this project. An admin can re-enable it under Project settings → EthicGuard.",
+		})
+		return
+	}
 	if !slices.Contains(cfg.TestedIssueTypes, req.Payload.IssueTypeID) {
 		writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": "issue_type_out_of_scope",
@@ -113,12 +122,19 @@ func (h *AnalysisHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.Queue.Put(jobID, req.Payload)
+	h.Queue.Put(jobID, jobs.Entry{
+		Payload: req.Payload,
+		Options: analysis.RunOptions{
+			SeverityThreshold: cfg.AgentSeverityThreshold,
+			PromptAddendum:    cfg.AgentPromptAddendum,
+		},
+	})
 	h.Logger.Info("analysis enqueued",
 		"cloud_id", inst.CloudID,
 		"issue_key", req.IssueKey,
 		"project_key", req.ProjectKey,
 		"job_id", jobID,
+		"severity_threshold", cfg.AgentSeverityThreshold,
 	)
 	writeJSON(w, http.StatusAccepted, enqueueResponse{JobID: jobID, Status: string(store.JobQueued)})
 }

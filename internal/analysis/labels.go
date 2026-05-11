@@ -25,6 +25,42 @@ const (
 	SeverityInfo   = "info"
 )
 
+// severityRank gives a comparable integer for severity strings; unknown
+// values land below "info" so they're dropped by any non-empty threshold.
+func severityRank(s string) int {
+	switch s {
+	case SeverityHigh:
+		return 4
+	case SeverityMedium:
+		return 3
+	case SeverityLow:
+		return 2
+	case SeverityInfo:
+		return 1
+	}
+	return 0
+}
+
+// FilterBySeverity returns the subset of findings whose severity is at least
+// the given threshold. Empty or unknown threshold passes everything through
+// unchanged.
+func FilterBySeverity(in []Finding, threshold string) []Finding {
+	if threshold == "" {
+		return in
+	}
+	minRank := severityRank(threshold)
+	if minRank <= 0 {
+		return in
+	}
+	out := make([]Finding, 0, len(in))
+	for _, f := range in {
+		if severityRank(f.Severity) >= minRank {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // Decision is the full outcome of an analysis: the primary AC label plus
 // the orthogonal "no test" flag. Callers (worker, agent) translate this
 // into the set of labels to write to Jira.

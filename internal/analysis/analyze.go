@@ -25,16 +25,24 @@ Return your analysis as a JSON array of findings. Each finding must be a JSON ob
 Return ONLY the JSON array. No markdown fences, no explanation text.
 If the issue has no quality problems, return an empty array: []`
 
-// LLM is the interface the analyzer uses to call the language model.
+// LLM is the interface the analyzer uses to call the language model. The
+// `systemAddendum` is per-call admin guidance appended after the cached
+// policy prompt; impls may send it as a separate non-cached block so the
+// stable policy text still benefits from prompt caching.
 type LLM interface {
-	Analyze(ctx context.Context, systemPrompt, userContent string) (string, error)
+	Analyze(ctx context.Context, systemPrompt, systemAddendum, userContent string) (string, error)
 }
 
-// Run executes an AC quality analysis on the given issue payload. The payload
-// content is held in memory for this call only — never persisted.
-func Run(ctx context.Context, llm LLM, req *AnalysisRequest) (*AnalysisResponse, error) {
+// Run executes an AC quality analysis on the given issue payload with the
+// supplied per-project options. The payload content is held in memory for
+// this call only — never persisted.
+//
+// Severity threshold (when set) filters the LLM's findings *after* parsing
+// so the downstream label decision and persistence see only findings the
+// project cares about.
+func Run(ctx context.Context, llm LLM, req *AnalysisRequest, opts RunOptions) (*AnalysisResponse, error) {
 	userContent := formatUserContent(&req.Payload)
-	raw, err := llm.Analyze(ctx, systemPrompt, userContent)
+	raw, err := llm.Analyze(ctx, systemPrompt, opts.PromptAddendum, userContent)
 	if err != nil {
 		return nil, fmt.Errorf("analysis run: %w", err)
 	}
@@ -46,6 +54,7 @@ func Run(ctx context.Context, llm LLM, req *AnalysisRequest) (*AnalysisResponse,
 	if err := json.Unmarshal([]byte(raw), &findings); err != nil {
 		return nil, fmt.Errorf("analysis parse findings: %w (raw: %s)", err, truncate(raw, 200))
 	}
+	findings = FilterBySeverity(findings, opts.SeverityThreshold)
 	return &AnalysisResponse{Findings: findings}, nil
 }
 

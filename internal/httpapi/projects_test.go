@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/ethicguard/ethicguard-api/internal/auth"
@@ -15,12 +16,12 @@ import (
 )
 
 type fakeProjects struct {
-	getCalls  int
-	setCalls  int
-	stored    map[string]*store.ProjectConfig
-	getErr    error
-	setErr    error
-	notFound  bool
+	getCalls int
+	setCalls int
+	stored   map[string]*store.ProjectConfig
+	getErr   error
+	setErr   error
+	notFound bool
 }
 
 func newFakeProjects() *fakeProjects {
@@ -42,12 +43,18 @@ func (f *fakeProjects) GetConfig(_ context.Context, _ int64, projectKey string) 
 	return cfg, nil
 }
 
-func (f *fakeProjects) SetTestedIssueTypes(_ context.Context, _ int64, projectKey string, types []string) (*store.ProjectConfig, error) {
+func (f *fakeProjects) SetConfig(_ context.Context, _ int64, projectKey string, in store.ProjectConfig) (*store.ProjectConfig, error) {
 	f.setCalls++
 	if f.setErr != nil {
 		return nil, f.setErr
 	}
-	cfg := &store.ProjectConfig{ProjectKey: projectKey, TestedIssueTypes: types}
+	cfg := &store.ProjectConfig{
+		ProjectKey:             projectKey,
+		TestedIssueTypes:       in.TestedIssueTypes,
+		AgentEnabled:           in.AgentEnabled,
+		AgentSeverityThreshold: in.AgentSeverityThreshold,
+		AgentPromptAddendum:    in.AgentPromptAddendum,
+	}
 	f.stored[projectKey] = cfg
 	return cfg, nil
 }
@@ -107,11 +114,27 @@ func TestProjectsHandler_Get_DefaultsWhenMissing(t *testing.T) {
 	if len(got.TestedIssueTypes) != 0 {
 		t.Errorf("testedIssueTypes = %v, want empty", got.TestedIssueTypes)
 	}
+	// Defaults: agent enabled, medium threshold, empty addendum.
+	if !got.AgentEnabled {
+		t.Errorf("agentEnabled = false, want true (default)")
+	}
+	if got.AgentSeverityThreshold != "medium" {
+		t.Errorf("agentSeverityThreshold = %q, want medium", got.AgentSeverityThreshold)
+	}
+	if got.AgentPromptAddendum != "" {
+		t.Errorf("agentPromptAddendum = %q, want empty", got.AgentPromptAddendum)
+	}
 }
 
 func TestProjectsHandler_Get_ReturnsStored(t *testing.T) {
 	p := newFakeProjects()
-	p.stored["PROJ"] = &store.ProjectConfig{ProjectKey: "PROJ", TestedIssueTypes: []string{"10001", "10002"}}
+	p.stored["PROJ"] = &store.ProjectConfig{
+		ProjectKey:             "PROJ",
+		TestedIssueTypes:       []string{"10001", "10002"},
+		AgentEnabled:           false,
+		AgentSeverityThreshold: "high",
+		AgentPromptAddendum:    "focus on accessibility",
+	}
 	handler := newTestHandler(p, &fakeAudits{})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/projects/PROJ/config", nil)
@@ -126,6 +149,15 @@ func TestProjectsHandler_Get_ReturnsStored(t *testing.T) {
 	if len(got.TestedIssueTypes) != 2 || got.TestedIssueTypes[0] != "10001" {
 		t.Errorf("testedIssueTypes = %v, want [10001 10002]", got.TestedIssueTypes)
 	}
+	if got.AgentEnabled {
+		t.Errorf("agentEnabled = true, want false")
+	}
+	if got.AgentSeverityThreshold != "high" {
+		t.Errorf("agentSeverityThreshold = %q, want high", got.AgentSeverityThreshold)
+	}
+	if got.AgentPromptAddendum != "focus on accessibility" {
+		t.Errorf("agentPromptAddendum = %q", got.AgentPromptAddendum)
+	}
 }
 
 func TestProjectsHandler_Put_SanitizesAndPersists(t *testing.T) {
@@ -133,9 +165,13 @@ func TestProjectsHandler_Put_SanitizesAndPersists(t *testing.T) {
 	a := &fakeAudits{}
 	handler := newTestHandler(p, a)
 
+	enabled := false
 	body, _ := json.Marshal(putConfigRequest{
-		TestedIssueTypes: []string{" 10001 ", "10001", "", "10002"},
-		ActorAccountID:   "acct-1",
+		TestedIssueTypes:       []string{" 10001 ", "10001", "", "10002"},
+		AgentEnabled:           &enabled,
+		AgentSeverityThreshold: "high",
+		AgentPromptAddendum:    "   prioritise accessibility   ",
+		ActorAccountID:         "acct-1",
 	})
 	req := httptest.NewRequest(http.MethodPut, "/v1/projects/PROJ/config", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -152,11 +188,98 @@ func TestProjectsHandler_Put_SanitizesAndPersists(t *testing.T) {
 	if got.TestedIssueTypes[0] != "10001" || got.TestedIssueTypes[1] != "10002" {
 		t.Errorf("stored types = %v, want [10001 10002]", got.TestedIssueTypes)
 	}
+	if got.AgentEnabled {
+		t.Errorf("agentEnabled = true, want false")
+	}
+	if got.AgentSeverityThreshold != "high" {
+		t.Errorf("agentSeverityThreshold = %q, want high", got.AgentSeverityThreshold)
+	}
+	if got.AgentPromptAddendum != "prioritise accessibility" {
+		t.Errorf("agentPromptAddendum = %q, want trimmed value", got.AgentPromptAddendum)
+	}
 	if len(a.calls) != 1 {
 		t.Fatalf("audit calls = %d, want 1", len(a.calls))
 	}
 	if a.calls[0].action != auditActionConfigUpdated || a.calls[0].actor != "acct-1" {
 		t.Errorf("audit call = %+v", a.calls[0])
+	}
+}
+
+func TestProjectsHandler_Put_PreservesUnsetFields(t *testing.T) {
+	// A PUT that doesn't include agentEnabled / agentSeverityThreshold should
+	// keep the previously stored values, not reset them to defaults.
+	p := newFakeProjects()
+	p.stored["PROJ"] = &store.ProjectConfig{
+		ProjectKey:             "PROJ",
+		TestedIssueTypes:       []string{"old"},
+		AgentEnabled:           false,
+		AgentSeverityThreshold: "high",
+		AgentPromptAddendum:    "keep me",
+	}
+	handler := newTestHandler(p, &fakeAudits{})
+
+	body, _ := json.Marshal(putConfigRequest{
+		TestedIssueTypes: []string{"10001"},
+	})
+	req := httptest.NewRequest(http.MethodPut, "/v1/projects/PROJ/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	got := p.stored["PROJ"]
+	if got.AgentEnabled {
+		t.Errorf("agentEnabled was overwritten to true; expected preserved false")
+	}
+	if got.AgentSeverityThreshold != "high" {
+		t.Errorf("threshold overwritten to %q; expected preserved high", got.AgentSeverityThreshold)
+	}
+	// Empty addendum in the request still clears the stored value — by design,
+	// the UI always sends the full current value, so empty means "cleared".
+	if got.AgentPromptAddendum != "" {
+		t.Errorf("addendum = %q, expected explicit clear to empty", got.AgentPromptAddendum)
+	}
+}
+
+func TestProjectsHandler_Put_RejectsInvalidSeverity(t *testing.T) {
+	p := newFakeProjects()
+	handler := newTestHandler(p, &fakeAudits{})
+
+	body, _ := json.Marshal(putConfigRequest{
+		TestedIssueTypes:       []string{"10001"},
+		AgentSeverityThreshold: "critical", // not a valid enum
+	})
+	req := httptest.NewRequest(http.MethodPut, "/v1/projects/PROJ/config", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if p.setCalls != 0 {
+		t.Errorf("set calls = %d, want 0 (rejected before persist)", p.setCalls)
+	}
+}
+
+func TestProjectsHandler_Put_RejectsAddendumTooLong(t *testing.T) {
+	p := newFakeProjects()
+	handler := newTestHandler(p, &fakeAudits{})
+
+	body, _ := json.Marshal(putConfigRequest{
+		TestedIssueTypes:    []string{"10001"},
+		AgentPromptAddendum: strings.Repeat("x", maxPromptAddendumBytes+1),
+	})
+	req := httptest.NewRequest(http.MethodPut, "/v1/projects/PROJ/config", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if p.setCalls != 0 {
+		t.Errorf("set calls = %d, want 0 (rejected before persist)", p.setCalls)
 	}
 }
 

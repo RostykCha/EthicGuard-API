@@ -90,7 +90,7 @@ func (p *Pool) run(ctx context.Context, id int) {
 func (p *Pool) processJob(ctx context.Context, log *slog.Logger, job *store.Job) {
 	log = log.With("job_id", job.ID, "issue_key", job.IssueKey, "kind", job.Kind)
 
-	payload, ok := p.deps.Queue.Take(job.ID)
+	entry, ok := p.deps.Queue.Take(job.ID)
 	if !ok {
 		log.Warn("payload missing — orphaned job, marking failed")
 		if err := p.deps.Jobs.MarkFailed(ctx, job.ID, "orphaned"); err != nil {
@@ -98,6 +98,7 @@ func (p *Pool) processJob(ctx context.Context, log *slog.Logger, job *store.Job)
 		}
 		return
 	}
+	payload := entry.Payload
 
 	start := time.Now()
 	req := &analysis.AnalysisRequest{
@@ -106,7 +107,7 @@ func (p *Pool) processJob(ctx context.Context, log *slog.Logger, job *store.Job)
 		Kind:       job.Kind,
 		Payload:    payload,
 	}
-	resp, err := analysis.Run(ctx, p.deps.LLM, req)
+	resp, err := analysis.Run(ctx, p.deps.LLM, req, entry.Options)
 	duration := time.Since(start)
 
 	if err != nil {

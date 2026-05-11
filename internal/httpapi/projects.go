@@ -16,7 +16,7 @@ import (
 // an interface so handler tests can fake it without a real Postgres.
 type ProjectsRepo interface {
 	GetConfig(ctx context.Context, installationID int64, projectKey string) (*store.ProjectConfig, error)
-	SetTestedIssueTypes(ctx context.Context, installationID int64, projectKey string, types []string) (*store.ProjectConfig, error)
+	SetConfig(ctx context.Context, installationID int64, projectKey string, in store.ProjectConfig) (*store.ProjectConfig, error)
 }
 
 // AuditsRepo is the audit-log surface this handler needs.
@@ -34,20 +34,49 @@ type ProjectsHandler struct {
 }
 
 type projectConfigResponse struct {
-	ProjectKey       string   `json:"projectKey"`
-	TestedIssueTypes []string `json:"testedIssueTypes"`
+	ProjectKey             string   `json:"projectKey"`
+	TestedIssueTypes       []string `json:"testedIssueTypes"`
+	AgentEnabled           bool     `json:"agentEnabled"`
+	AgentSeverityThreshold string   `json:"agentSeverityThreshold"`
+	AgentPromptAddendum    string   `json:"agentPromptAddendum"`
 }
 
 type putConfigRequest struct {
-	TestedIssueTypes []string `json:"testedIssueTypes"`
-	ActorAccountID   string   `json:"actorAccountId,omitempty"`
+	TestedIssueTypes       []string `json:"testedIssueTypes"`
+	AgentEnabled           *bool    `json:"agentEnabled,omitempty"`
+	AgentSeverityThreshold string   `json:"agentSeverityThreshold,omitempty"`
+	AgentPromptAddendum    string   `json:"agentPromptAddendum,omitempty"`
+	ActorAccountID         string   `json:"actorAccountId,omitempty"`
 }
 
 const (
 	auditActionConfigUpdated = "project.config.updated"
 	maxIssueTypes            = 50
 	maxIssueTypeIDLen        = 64
+	maxPromptAddendumBytes   = 1024
+	defaultSeverityThreshold = "medium"
 )
+
+func isValidSeverity(s string) bool {
+	switch s {
+	case "info", "low", "medium", "high":
+		return true
+	}
+	return false
+}
+
+// defaultConfig is what an installation gets before the admin saves anything.
+// agent_enabled=true matches the migration default — a brand-new project that
+// has issue types in scope analyses without further opt-in.
+func defaultConfig(projectKey string) *store.ProjectConfig {
+	return &store.ProjectConfig{
+		ProjectKey:             projectKey,
+		TestedIssueTypes:       []string{},
+		AgentEnabled:           true,
+		AgentSeverityThreshold: defaultSeverityThreshold,
+		AgentPromptAddendum:    "",
+	}
+}
 
 // ServeHTTP dispatches GET/PUT under the path /v1/projects/{projectKey}/config.
 // Other methods return 405.
@@ -78,10 +107,7 @@ func (h *ProjectsHandler) handleGet(w http.ResponseWriter, r *http.Request, inst
 	cfg, err := h.Projects.GetConfig(r.Context(), inst.ID, projectKey)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			writeJSON(w, http.StatusOK, projectConfigResponse{
-				ProjectKey:       projectKey,
-				TestedIssueTypes: []string{},
-			})
+			writeJSON(w, http.StatusOK, configToResponse(defaultConfig(projectKey)))
 			return
 		}
 		h.Logger.Error("projects get config failed",
@@ -89,10 +115,7 @@ func (h *ProjectsHandler) handleGet(w http.ResponseWriter, r *http.Request, inst
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "config lookup failed"})
 		return
 	}
-	writeJSON(w, http.StatusOK, projectConfigResponse{
-		ProjectKey:       cfg.ProjectKey,
-		TestedIssueTypes: cfg.TestedIssueTypes,
-	})
+	writeJSON(w, http.StatusOK, configToResponse(cfg))
 }
 
 func (h *ProjectsHandler) handlePut(w http.ResponseWriter, r *http.Request, inst *store.Installation, projectKey string) {
@@ -107,9 +130,47 @@ func (h *ProjectsHandler) handlePut(w http.ResponseWriter, r *http.Request, inst
 		return
 	}
 
-	cfg, err := h.Projects.SetTestedIssueTypes(r.Context(), inst.ID, projectKey, types)
+	// Load existing config so an admin who only updates one field doesn't
+	// have to round-trip everything — falls back to defaults if no row yet.
+	existing, err := h.Projects.GetConfig(r.Context(), inst.ID, projectKey)
 	if err != nil {
-		h.Logger.Error("projects set tested types failed",
+		if !errors.Is(err, store.ErrNotFound) {
+			h.Logger.Error("projects get config failed before put",
+				"err", err, "cloud_id", inst.CloudID, "project_key", projectKey)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "config lookup failed"})
+			return
+		}
+		existing = defaultConfig(projectKey)
+	}
+
+	merged := store.ProjectConfig{
+		ProjectKey:             projectKey,
+		TestedIssueTypes:       types,
+		AgentEnabled:           existing.AgentEnabled,
+		AgentSeverityThreshold: existing.AgentSeverityThreshold,
+		AgentPromptAddendum:    existing.AgentPromptAddendum,
+	}
+	if req.AgentEnabled != nil {
+		merged.AgentEnabled = *req.AgentEnabled
+	}
+	if req.AgentSeverityThreshold != "" {
+		if !isValidSeverity(req.AgentSeverityThreshold) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid agentSeverityThreshold"})
+			return
+		}
+		merged.AgentSeverityThreshold = req.AgentSeverityThreshold
+	}
+	if len(req.AgentPromptAddendum) > maxPromptAddendumBytes {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "agentPromptAddendum too long"})
+		return
+	}
+	// Empty string is a valid explicit clear; we always overwrite the addendum
+	// to whatever the client sent (the UI always sends the full current value).
+	merged.AgentPromptAddendum = strings.TrimSpace(req.AgentPromptAddendum)
+
+	cfg, err := h.Projects.SetConfig(r.Context(), inst.ID, projectKey, merged)
+	if err != nil {
+		h.Logger.Error("projects set config failed",
 			"err", err, "cloud_id", inst.CloudID, "project_key", projectKey)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "config update failed"})
 		return
@@ -117,11 +178,13 @@ func (h *ProjectsHandler) handlePut(w http.ResponseWriter, r *http.Request, inst
 
 	if h.Audits != nil {
 		meta := map[string]any{
-			"project_key":        projectKey,
-			"tested_issue_types": types,
+			"project_key":               projectKey,
+			"tested_issue_types":        types,
+			"agent_enabled":             merged.AgentEnabled,
+			"agent_severity_threshold":  merged.AgentSeverityThreshold,
+			"agent_prompt_addendum_len": len(merged.AgentPromptAddendum),
 		}
 		if err := h.Audits.Log(r.Context(), inst.ID, req.ActorAccountID, auditActionConfigUpdated, "project:"+projectKey, meta); err != nil {
-			// Audit failure should not fail the user's write — log and continue.
 			h.Logger.Warn("audit log failed",
 				"err", err, "cloud_id", inst.CloudID, "project_key", projectKey)
 		}
@@ -131,12 +194,25 @@ func (h *ProjectsHandler) handlePut(w http.ResponseWriter, r *http.Request, inst
 		"cloud_id", inst.CloudID,
 		"project_key", projectKey,
 		"tested_issue_types_count", len(types),
+		"agent_enabled", merged.AgentEnabled,
+		"agent_severity_threshold", merged.AgentSeverityThreshold,
 		"actor", req.ActorAccountID,
 	)
-	writeJSON(w, http.StatusOK, projectConfigResponse{
-		ProjectKey:       cfg.ProjectKey,
-		TestedIssueTypes: cfg.TestedIssueTypes,
-	})
+	writeJSON(w, http.StatusOK, configToResponse(cfg))
+}
+
+func configToResponse(cfg *store.ProjectConfig) projectConfigResponse {
+	types := cfg.TestedIssueTypes
+	if types == nil {
+		types = []string{}
+	}
+	return projectConfigResponse{
+		ProjectKey:             cfg.ProjectKey,
+		TestedIssueTypes:       types,
+		AgentEnabled:           cfg.AgentEnabled,
+		AgentSeverityThreshold: cfg.AgentSeverityThreshold,
+		AgentPromptAddendum:    cfg.AgentPromptAddendum,
+	}
 }
 
 // sanitizeIssueTypes trims, drops empties, dedupes, and bounds the list. The

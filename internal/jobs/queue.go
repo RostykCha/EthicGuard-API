@@ -17,27 +17,36 @@ import (
 	"github.com/ethicguard/ethicguard-api/internal/analysis"
 )
 
+// Entry bundles the in-memory payload with the per-project run options the
+// handler resolved at enqueue time. Both travel together so the worker can
+// stay free of any store dependency — all the per-project knobs it needs
+// are already on the entry by the time it claims the job.
+type Entry struct {
+	Payload analysis.IssuePayload
+	Options analysis.RunOptions
+}
+
 // Queue is the in-memory payload bus between handler and workers.
 type Queue struct {
 	mu       sync.Mutex
-	payloads map[int64]analysis.IssuePayload
+	entries  map[int64]Entry
 	wake     chan struct{}
 }
 
 // New builds an empty queue with a buffered wake channel.
 func New() *Queue {
 	return &Queue{
-		payloads: make(map[int64]analysis.IssuePayload),
-		wake:     make(chan struct{}, 1),
+		entries: make(map[int64]Entry),
+		wake:    make(chan struct{}, 1),
 	}
 }
 
-// Put stashes the payload under the given job id and signals one waiter.
+// Put stashes the entry under the given job id and signals one waiter.
 // Non-blocking: the wake channel is buffered (capacity 1) so the signal
 // coalesces if a worker is already awake.
-func (q *Queue) Put(jobID int64, p analysis.IssuePayload) {
+func (q *Queue) Put(jobID int64, e Entry) {
 	q.mu.Lock()
-	q.payloads[jobID] = p
+	q.entries[jobID] = e
 	q.mu.Unlock()
 	select {
 	case q.wake <- struct{}{}:
@@ -45,16 +54,16 @@ func (q *Queue) Put(jobID int64, p analysis.IssuePayload) {
 	}
 }
 
-// Take retrieves and removes the payload for a job. Returns ok=false when
+// Take retrieves and removes the entry for a job. Returns ok=false when
 // nothing is stashed (worker handles this as an orphaned job).
-func (q *Queue) Take(jobID int64) (analysis.IssuePayload, bool) {
+func (q *Queue) Take(jobID int64) (Entry, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	p, ok := q.payloads[jobID]
+	e, ok := q.entries[jobID]
 	if ok {
-		delete(q.payloads, jobID)
+		delete(q.entries, jobID)
 	}
-	return p, ok
+	return e, ok
 }
 
 // Wake returns the channel workers listen on to wake up early. A poll-tick

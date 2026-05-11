@@ -81,6 +81,35 @@ func TestDecisionLabels(t *testing.T) {
 	}
 }
 
+func TestFilterBySeverity(t *testing.T) {
+	all := []Finding{
+		{Severity: SeverityInfo},
+		{Severity: SeverityLow},
+		{Severity: SeverityMedium},
+		{Severity: SeverityHigh},
+	}
+	cases := []struct {
+		name      string
+		threshold string
+		wantLen   int
+	}{
+		{"empty threshold passes everything", "", 4},
+		{"info keeps everything", SeverityInfo, 4},
+		{"low drops info", SeverityLow, 3},
+		{"medium drops info+low", SeverityMedium, 2},
+		{"high keeps only high", SeverityHigh, 1},
+		{"unknown threshold is treated as no-op", "critical", 4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := FilterBySeverity(all, tc.threshold)
+			if len(got) != tc.wantLen {
+				t.Errorf("FilterBySeverity(%q) returned %d findings, want %d", tc.threshold, len(got), tc.wantLen)
+			}
+		})
+	}
+}
+
 func TestMessageCatalog(t *testing.T) {
 	// Sanity check: every category × severity combo the LLM is allowed to
 	// emit must have a catalog entry. If you add a new category to the system

@@ -114,61 +114,76 @@ Where everything runs and who talks to whom.
                     └──────────────────────────────┘
 ```
 
-### Request flow — "Run QA Review"
+### Request flow — auto-analysis on AC edit (2026-05-11)
 
-The core product path: user → Jira → Forge → API → Claude → findings.
+The core product path: a Jira admin edits an issue's AC field → the Forge
+trigger normalizes it → API gates on the per-project agent config → worker
+calls Claude → label is stamped back on the issue.
 
 ```
-User clicks "Run QA Review" in Jira
+Jira admin edits the AC field on an in-scope issue
   │
   ▼
-Forge runtime invokes resolver runQaReview
+avi:jira:updated:issue  ──►  Forge trigger issue-updated
+  │
+  ├─► filter changelog: only proceed if AC field changed
   │
   ├─► @forge/api.asApp().requestJira(/rest/api/3/issue/{key})
   │   (scope: read:jira-work)
   │
   ├─► normalizeIssue(raw)                    in-memory only, never persisted
-  │
   ├─► storage.get(sharedSecret)              per-install Forge storage
+  ├─► mintApiToken(cloudId)                  HS256, aud=ethicguard-api, ttl≤5m
   │
-  ├─► mintApiToken(cloudId)                  HS256, aud=ethicguard-api,
-  │                                          ttl=300s, signed with shared secret
-  │
-  └─► POST https://api.ethicguard.ai/v1/analysis
-      Authorization: Bearer <JWT>
+  └─► POST https://api.ethicguard.ai/v1/analysis  (Bearer JWT)
       body: { issueKey, projectKey, kind: "ac_quality",
               payload: NormalizedIssue }
       │
       ▼
-      auth.Middleware
-      ├─ peekCloudID(token)                   unverified cloudId peek
-      ├─ installations.GetByCloudID(cloudID)  Postgres SELECT
-      ├─ auth.Verify(token, inst.SharedSecret, AudienceAPI)
-      └─ ctx = WithValue(ctx, *Installation)
+      auth.Middleware → ctx.Installation
       │
       ▼
       AnalysisHandler.ServeHTTP
-      ├─ decode json.Body → analysis.AnalysisRequest
-      └─ analysis.Run(ctx, llm, req)
-          ├─ formatUserContent(payload)       markdown, in-memory
-          ├─ llm.Analyze(ctx, systemPrompt, userContent)
-          │   └─► anthropic.Client.Messages.New
-          │       ├─ model:     claude-sonnet-4-6
-          │       ├─ maxTokens: 4096
-          │       ├─ system:    QA policy (CacheControl: ephemeral)
-          │       └─ user:      serialized issue content
-          │   ◄── JSON array of findings in a text block
-          ├─ stripCodeFence(raw)
-          └─ json.Unmarshal → []Finding
-      │
-      ▼
-      writeJSON(200, { findings: Finding[] })
+      ├─ Projects.GetConfig(installID, projectKey)
+      ├─ gate: 403 agent_disabled         if !cfg.AgentEnabled
+      ├─ gate: 403 issue_type_out_of_scope if issueTypeID not in TestedIssueTypes
+      ├─ Projects.Upsert → projectID
+      ├─ Jobs.Enqueue (status='queued')      → jobID
+      ├─ Queue.Put(jobID, Entry{
+      │     Payload: NormalizedIssue,
+      │     Options: { SeverityThreshold, PromptAddendum } from cfg
+      │   })
+      └─ 202 { jobId, status: "queued" }    (handler returns immediately)
+  │                                         (Forge trigger then polls)
+  ▼
+worker.Pool (goroutines, in-process)
+  │
+  ├─ Jobs.ClaimNext (SELECT … FOR UPDATE SKIP LOCKED → status='running')
+  ├─ Queue.Take(jobID) → Entry
+  ├─ analysis.Run(ctx, llm, req, opts)
+  │   ├─ formatUserContent(payload)         markdown, in-memory
+  │   ├─ llm.Analyze(ctx, systemPrompt, opts.PromptAddendum, userContent)
+  │   │   └─► anthropic.Client.Messages.New
+  │   │       ├─ model:  claude-sonnet-4-6
+  │   │       ├─ system: [ QA policy (cached, ephemeral),
+  │   │       │            per-project addendum (non-cached, optional) ]
+  │   │       └─ user:   serialized issue content
+  │   │   ◄── JSON array of findings
+  │   ├─ stripCodeFence + json.Unmarshal → []Finding
+  │   └─ FilterBySeverity(findings, opts.SeverityThreshold)
+  │
+  ├─ Findings.InsertBatch (anchors + message_key only; no issue text)
+  ├─ analysis.Decide(findings, payload) → Decision{ Primary, NoTest }
+  └─ Jobs.MarkDone(jobID, decision.Primary)
   │
   ▼
-Forge runtime returns findings to the Jira UI Kit view
-  │
-  ▼
-User sees structured findings rendered in the EthicGuard panel.
+Forge trigger polls /v1/analysis/{jobId} until status='done',
+then setAcLabels() writes [resultLabel, "no test"?] back to the issue.
+
+Rovo agent surface (parallel, user-driven):
+  Rovo sidebar  ──► rovo:action handlers in Forge
+    ├─ ethicguard-explain-label  →  GET /v1/issues/{key}/latest  →  summary
+    └─ ethicguard-run-analysis   →  POST /v1/analysis            (same path as above)
 ```
 
 ### Install / uninstall flow
@@ -407,6 +422,71 @@ Old architecture diagrams live here, newest first. Any change that replaces a
 diagram above must move the outgoing version here with a date and a one-line
 reason. Diagrams are append-only — the history of how the system grew is
 worth more than a clean slate.
+
+### v1 — synchronous handler (2026-04-19, retired 2026-05-11)
+
+The first deployed pipeline ran analysis synchronously inside the API
+handler — `analysis.Run` called from `AnalysisHandler.ServeHTTP` and the
+response carried the findings inline. There was no project-config gate (the
+handler accepted any in-scope issue type) and no per-project agent knobs.
+
+Replaced when the per-project agent config (`agent_enabled`,
+`agent_severity_threshold`, `agent_prompt_addendum`) and the asynchronous
+worker pool landed together — the handler now enqueues, the worker pulls
+the entry (payload + run options) from the in-memory bus, and the Rovo
+agent surface (`rovo:agent ethicguard-ac-reviewer`) sits alongside the
+trigger-driven path.
+
+```
+User clicks "Run QA Review" in Jira
+  │
+  ▼
+Forge runtime invokes resolver runQaReview
+  │
+  ├─► @forge/api.asApp().requestJira(/rest/api/3/issue/{key})
+  │   (scope: read:jira-work)
+  │
+  ├─► normalizeIssue(raw)                    in-memory only, never persisted
+  ├─► storage.get(sharedSecret)              per-install Forge storage
+  ├─► mintApiToken(cloudId)                  HS256, aud=ethicguard-api,
+  │                                          ttl=300s, signed with shared secret
+  │
+  └─► POST https://api.ethicguard.ai/v1/analysis
+      Authorization: Bearer <JWT>
+      body: { issueKey, projectKey, kind: "ac_quality",
+              payload: NormalizedIssue }
+      │
+      ▼
+      auth.Middleware
+      ├─ peekCloudID(token)                   unverified cloudId peek
+      ├─ installations.GetByCloudID(cloudID)  Postgres SELECT
+      ├─ auth.Verify(token, inst.SharedSecret, AudienceAPI)
+      └─ ctx = WithValue(ctx, *Installation)
+      │
+      ▼
+      AnalysisHandler.ServeHTTP
+      ├─ decode json.Body → analysis.AnalysisRequest
+      └─ analysis.Run(ctx, llm, req)
+          ├─ formatUserContent(payload)       markdown, in-memory
+          ├─ llm.Analyze(ctx, systemPrompt, userContent)
+          │   └─► anthropic.Client.Messages.New
+          │       ├─ model:     claude-sonnet-4-6
+          │       ├─ maxTokens: 4096
+          │       ├─ system:    QA policy (CacheControl: ephemeral)
+          │       └─ user:      serialized issue content
+          │   ◄── JSON array of findings in a text block
+          ├─ stripCodeFence(raw)
+          └─ json.Unmarshal → []Finding
+      │
+      ▼
+      writeJSON(200, { findings: Finding[] })
+  │
+  ▼
+Forge runtime returns findings to the Jira UI Kit view
+  │
+  ▼
+User sees structured findings rendered in the EthicGuard panel.
+```
 
 ### v0 — initial plan (2026-04-13)
 

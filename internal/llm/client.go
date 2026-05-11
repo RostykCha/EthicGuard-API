@@ -21,20 +21,29 @@ func New(apiKey, model string) *Client {
 	return &Client{inner: client, model: model}
 }
 
-// Analyze sends a system prompt + user content to Claude and returns the raw
-// text response. Prompt caching is enabled on the system prompt via cache
-// control; repeated calls with the same system prompt (which includes the QA
-// policy) reuse the cached prefix.
-func (c *Client) Analyze(ctx context.Context, systemPrompt, userContent string) (string, error) {
+// Analyze sends a system prompt + optional non-cached addendum + user content
+// to Claude and returns the raw text response.
+//
+// Caching: the static `systemPrompt` is sent as a cacheable block. The
+// `systemAddendum` (per-project guidance) is sent as a second, non-cached
+// system block when non-empty. Splitting them this way preserves the
+// cache hit on the (stable) policy text while still letting projects layer
+// their own guidance on top per analysis.
+func (c *Client) Analyze(ctx context.Context, systemPrompt, systemAddendum, userContent string) (string, error) {
+	system := []anthropic.TextBlockParam{
+		{
+			Text:         systemPrompt,
+			CacheControl: anthropic.CacheControlEphemeralParam{Type: "ephemeral"},
+		},
+	}
+	if strings.TrimSpace(systemAddendum) != "" {
+		system = append(system, anthropic.TextBlockParam{Text: systemAddendum})
+	}
+
 	msg, err := c.inner.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.Model(c.model),
 		MaxTokens: 4096,
-		System: []anthropic.TextBlockParam{
-			{
-				Text:         systemPrompt,
-				CacheControl: anthropic.CacheControlEphemeralParam{Type: "ephemeral"},
-			},
-		},
+		System:    system,
 		Messages: []anthropic.MessageParam{
 			anthropic.NewUserMessage(anthropic.NewTextBlock(userContent)),
 		},
