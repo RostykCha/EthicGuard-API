@@ -28,10 +28,12 @@ type AnalysisRequest struct {
 // only in memory for the duration of the analysis call — never persisted.
 type IssuePayload struct {
 	Key                string   `json:"key"`
+	IssueTypeID        string   `json:"issueTypeId"`
 	Summary            string   `json:"summary"`
 	Description        string   `json:"description"`
 	AcceptanceCriteria string   `json:"acceptanceCriteria"`
 	LinkedIssueKeys    []string `json:"linkedIssueKeys"`
+	HasTestLinks       bool     `json:"hasTestLinks"`
 }
 
 // AnalysisResponse is the shape returned to the Forge UI.

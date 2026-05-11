@@ -4,18 +4,23 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/ethicguard/ethicguard-api/internal/analysis"
 	"github.com/ethicguard/ethicguard-api/internal/auth"
 	"github.com/ethicguard/ethicguard-api/internal/store"
 )
 
-// Deps bundles what the router needs to wire handlers and middleware.
+// Deps bundles what the router needs to wire handlers and middleware. The
+// LLM is wired into the worker pool now (not the analysis handler), so it
+// isn't carried here.
 type Deps struct {
 	Logger          *slog.Logger
 	Installations   *store.Installations
+	Projects        ProjectsRepoFull
+	Audits          AuditsRepo
+	Jobs            JobsRepo
+	Findings        FindingsRepo
+	Queue           PayloadEnqueuer
 	InstallerSecret string
 	JWTAudience     string
-	LLM             analysis.LLM
 }
 
 // NewRouter builds the http handler tree. Public routes (health, version,
@@ -42,9 +47,31 @@ func NewRouter(d Deps) http.Handler {
 
 	// Feature routes behind auth middleware.
 	authed := http.NewServeMux()
-	if d.LLM != nil {
-		analysisH := &AnalysisHandler{Logger: d.Logger, LLM: d.LLM}
+	if d.Jobs != nil && d.Projects != nil && d.Queue != nil {
+		analysisH := &AnalysisHandler{
+			Logger:   d.Logger,
+			Jobs:     d.Jobs,
+			Projects: d.Projects,
+			Queue:    d.Queue,
+		}
 		authed.Handle("POST /v1/analysis", analysisH)
+	}
+	if d.Jobs != nil && d.Findings != nil {
+		jobsH := &JobsHandler{Logger: d.Logger, Jobs: d.Jobs, Findings: d.Findings}
+		authed.Handle("GET /v1/analysis/{jobId}", jobsH)
+		// The latest-issue route reads the newest job for an issue. d.Jobs
+		// (the concrete *store.Jobs) implements both interfaces — see jobs.go.
+		if latestLookup, ok := d.Jobs.(LatestJobLookup); ok {
+			latestH := &LatestIssueHandler{Logger: d.Logger, Jobs: latestLookup, JobByID: d.Jobs, Findings: d.Findings}
+			authed.Handle("GET /v1/issues/{issueKey}/latest", latestH)
+		}
+	}
+	if d.Projects != nil {
+		projectsH := &ProjectsHandler{Logger: d.Logger, Projects: d.Projects, Audits: d.Audits}
+		// Both GET and PUT share the path; the handler routes by method so we
+		// keep the path-value extraction (`{projectKey}`) in one place.
+		authed.Handle("GET /v1/projects/{projectKey}/config", projectsH)
+		authed.Handle("PUT /v1/projects/{projectKey}/config", projectsH)
 	}
 
 	if d.Installations != nil {

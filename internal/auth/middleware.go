@@ -26,6 +26,14 @@ func InstallationFromContext(ctx context.Context) *store.Installation {
 	return nil
 }
 
+// WithInstallationForTest returns a context with the given installation
+// attached, mirroring what Middleware does for an authenticated request. Use
+// only from *_test.go in other packages — production code must go through the
+// real middleware so the JWT is actually verified.
+func WithInstallationForTest(ctx context.Context, inst *store.Installation) context.Context {
+	return context.WithValue(ctx, ctxInstallation, inst)
+}
+
 // MiddlewareDeps is the minimal surface Middleware needs. Declaring it as an
 // interface keeps the auth package free of a direct pgx dependency in tests.
 type MiddlewareDeps interface {
