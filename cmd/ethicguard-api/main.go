@@ -88,14 +88,18 @@ func main() {
 	// handler is gated on Jobs being set below.
 	if jobsRepo != nil && findingsRepo != nil && llmClient != nil {
 		pool := worker.New(worker.Deps{
-			Logger:   logger,
-			Jobs:     jobsRepo,
-			Findings: findingsRepo,
-			Queue:    queue,
-			LLM:      llmClient,
+			Logger:     logger,
+			Jobs:       jobsRepo,
+			Findings:   findingsRepo,
+			Queue:      queue,
+			LLM:        llmClient,
+			JobTimeout: cfg.JobTimeout,
 		}, cfg.WorkerConcurrency, 5*time.Second)
 		pool.Start(ctx)
-		logger.Info("worker pool started", "concurrency", cfg.WorkerConcurrency)
+		logger.Info("worker pool started",
+			"concurrency", cfg.WorkerConcurrency,
+			"job_timeout", cfg.JobTimeout,
+		)
 	}
 
 	// Pass repositories through nil-safe assignment: putting a typed nil
