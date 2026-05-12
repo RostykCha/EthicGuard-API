@@ -10,6 +10,13 @@ import (
 // PersistedFinding is what we write to `findings`: an anchor + a stable
 // message_key. The human-readable text is NOT persisted (zero-retention) —
 // it's resolved from a static catalog at render time.
+//
+// AGENT-NOTE: This struct is the zero-retention boundary. If you find
+// yourself wanting to add `Message string`, `Description string`, or any
+// other free-form text field, stop and re-read CLAUDE.md → "The
+// non-negotiable rule". The right answer is almost always "add a new
+// message_key to internal/analysis/catalog.go" and let the UI re-fetch
+// live Jira content for context.
 type PersistedFinding struct {
 	ID         int64
 	JobID      int64

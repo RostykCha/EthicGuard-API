@@ -1,3 +1,12 @@
+// Package llm wraps the Anthropic SDK with EthicGuard's defaults: prompt
+// caching on the system block, structured-JSON request shape, bounded
+// retry on transient errors. It is the only package that talks to the
+// model vendor.
+//
+// AGENT-NOTE: Never log prompt bodies or response text above slog.LevelDebug.
+// Prompts contain the user's AC text and Anthropic responses sometimes
+// echo it back. CLAUDE.md "LLM integration rules" makes this a hard rule;
+// see also the zero-retention boundary in internal/store.
 package llm
 
 import (

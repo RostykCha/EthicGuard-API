@@ -1,3 +1,23 @@
+// EthicGuard-API entrypoint. Wires config → store → llm → worker → http
+// server and runs until SIGINT/SIGTERM. See ARCHITECTURE.md for the
+// system-level diagrams and CLAUDE.md for the package conventions.
+//
+// REPO-MAP:
+//
+//   cmd/ethicguard-api/     this file. wiring + shutdown only.
+//   internal/
+//     analysis/             prompt construction + LLM boundary + label decision (in-memory)
+//     auth/                 Forge-JWT verification, installation lookup
+//     config/               env var single source; Load() at startup
+//     httpapi/              HTTP routes + handlers; consumer-owned interfaces
+//     jobs/                 in-process payload bus between handler and worker
+//     llm/                  Anthropic SDK wrapper; bounded-retry; cache-aware
+//     store/                pgx/v5 repositories; zero-retention boundary
+//     version/              build-time version string
+//     worker/               goroutine pool; claim→analyze→persist→mark done
+//
+// Cross-package imports flow inward: store never imports httpapi/llm; the
+// handler depends on interfaces declared near itself, not on store directly.
 package main
 
 import (

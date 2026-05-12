@@ -26,6 +26,13 @@ type Entry struct {
 	Options analysis.RunOptions
 }
 
+// AGENT-NOTE: This is the bridge that lets the worker stay free of any
+// store dependency. The handler enqueues a row in `jobs` (Postgres) AND
+// puts the payload+options here; the worker claims the row, then Takes the
+// payload from here. If you find yourself wanting to persist the payload to
+// Postgres so it survives restarts, stop — that violates the zero-retention
+// rule. See ARCHITECTURE.md "payload bus" for the rationale.
+
 // Queue is the in-memory payload bus between handler and workers.
 type Queue struct {
 	mu       sync.Mutex

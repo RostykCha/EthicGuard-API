@@ -149,23 +149,53 @@ almost certainly "store an anchor and a message key."
   (`429`, `5xx`, network). Never retry on a 4xx other than `429`.
 - Do not fall back to another provider. Claude-only is a product decision.
 
+## Code conventions (enforced by review)
+
+Short, grep-friendly rules. Each maps to a concrete pattern in the code;
+see [docs/CONVENTIONS.md](docs/CONVENTIONS.md) for one representative
+example file per rule.
+
+1. **HTTP errors go through the helpers in [internal/httpapi/errors.go](internal/httpapi/errors.go)** — `badRequest`, `notFound`, `unauthorized`, `methodNotAllowed`, `internalErr`, `forbidden`. Never write `map[string]string{"error": ...}` inline in a handler.
+2. **Validation limits live in [internal/httpapi/validation.go](internal/httpapi/validation.go).** No `const max…` inline in a handler file.
+3. **Severity comparisons go through `analysis.Severity.AtLeast`.** No inline `switch severity` outside [internal/analysis/labels.go](internal/analysis/labels.go).
+4. **Use `store.IsNotFound(err)`**, not `errors.Is(err, store.ErrNotFound)`. One spelling, grep-friendly.
+5. **Every LLM call runs under a `context.WithTimeout`.** Workers do this in [internal/worker/pool.go](internal/worker/pool.go); any new caller of `analysis.Run` does the same.
+6. **Every package under `internal/` carries a `// Package …` doc comment** stating its one invariant (e.g. zero-retention boundary, env-var single source).
+7. **Constructors in `internal/store` never return nil without an error.** Callers do not nil-check return values.
+8. **Handler tests use `httptest` + the real router from `httpapi.NewRouter`,** not a hand-built `http.HandlerFunc`. Matches the pattern in `httpapi/projects_test.go`.
+
+## OpenAPI types
+
+The cross-repo conventions block above claims `api/openapi.yaml` is the
+source of truth. **That file does not yet exist.** Until it does:
+
+- The UI types in `EthicGuard-UI/src/api/client.ts` and
+  `EthicGuard-UI/src/resolvers/*.ts` are **hand-written**. Treat the Go
+  request/response structs in `internal/httpapi/*.go` as the contract.
+- **When an API shape changes**, the UI types change in the same PR set.
+- The `openapi-typescript` generator is wired on the UI side but pointed
+  at a missing file; bringing it online is its own task.
+
 ## Definition of done (per change)
 
 Before claiming a task complete:
 
-1. `go build ./...` succeeds.
-2. `go test -race -count=1 ./...` is green.
-3. `golangci-lint run` is clean (or you've explained the suppression).
-4. New behavior has tests; new schema has a migration.
-5. If the change touches storage or LLM calls, the commit body says so.
+1. `make verify` is green (runs `go build ./... && go test -race -count=1 ./... && golangci-lint run`).
+2. New behavior has tests; new schema has a migration.
+3. If the change touches storage or LLM calls, the commit body says so.
 
 If you can't run any of these (e.g. no DB available locally), say so
 explicitly in the response — do not claim "tests pass" when you skipped them.
 
 ## Files you should know
 
-- [cmd/ethicguard-api/main.go](cmd/ethicguard-api/main.go) — wiring & shutdown
+- [cmd/ethicguard-api/main.go](cmd/ethicguard-api/main.go) — wiring & shutdown, repo map at top
 - [internal/config/config.go](internal/config/config.go) — env vars (single source)
 - [internal/httpapi/router.go](internal/httpapi/router.go) — route registration
+- [internal/httpapi/errors.go](internal/httpapi/errors.go) — HTTP error envelope
+- [internal/httpapi/validation.go](internal/httpapi/validation.go) — request-validation limits
+- [internal/analysis/labels.go](internal/analysis/labels.go) — severity rank + AC label decision rule
+- [internal/store/errors.go](internal/store/errors.go) — `IsNotFound` helper
 - [migrations/0001_init.sql](migrations/0001_init.sql) — schema baseline
+- [docs/CONVENTIONS.md](docs/CONVENTIONS.md) — the 8 review-enforced rules with example links
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system-level contracts
