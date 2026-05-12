@@ -61,17 +61,17 @@ type enqueueResponse struct {
 func (h *AnalysisHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	inst := auth.InstallationFromContext(r.Context())
 	if inst == nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "no installation"})
+		unauthorized(w, "no installation")
 		return
 	}
 
 	var req analysis.AnalysisRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		badRequest(w, "invalid json")
 		return
 	}
 	if req.IssueKey == "" || req.Payload.Key == "" || req.ProjectKey == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "issueKey, projectKey and payload.key are required"})
+		badRequest(w, "issueKey, projectKey and payload.key are required")
 		return
 	}
 	if req.Kind == "" {
@@ -83,31 +83,25 @@ func (h *AnalysisHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// everything; admin must opt-in before analyses run.
 	cfg, err := h.Projects.GetConfig(r.Context(), inst.ID, req.ProjectKey)
 	if err != nil {
-		writeJSON(w, http.StatusForbidden, map[string]string{
-			"error": "issue_type_out_of_scope",
-			"hint":  "project not configured — admin must select issue types in EthicGuard project settings",
-		})
+		forbidden(w, "issue_type_out_of_scope",
+			"project not configured — admin must select issue types in EthicGuard project settings")
 		return
 	}
 	if !cfg.AgentEnabled {
-		writeJSON(w, http.StatusForbidden, map[string]string{
-			"error": "agent_disabled",
-			"hint":  "EthicGuard AC Reviewer is turned off for this project. An admin can re-enable it under Project settings → EthicGuard.",
-		})
+		forbidden(w, "agent_disabled",
+			"EthicGuard AC Reviewer is turned off for this project. An admin can re-enable it under Project settings → EthicGuard.")
 		return
 	}
 	if !slices.Contains(cfg.TestedIssueTypes, req.Payload.IssueTypeID) {
-		writeJSON(w, http.StatusForbidden, map[string]string{
-			"error": "issue_type_out_of_scope",
-			"hint":  "this issue type is not enabled for EthicGuard analysis in project settings",
-		})
+		forbidden(w, "issue_type_out_of_scope",
+			"this issue type is not enabled for EthicGuard analysis in project settings")
 		return
 	}
 
 	projectID, err := h.Projects.Upsert(r.Context(), inst.ID, req.ProjectKey)
 	if err != nil {
-		h.Logger.Error("project upsert failed", "err", err, "cloud_id", inst.CloudID, "project_key", req.ProjectKey)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "project resolve failed"})
+		internalErr(w, h.Logger, err, "project resolve failed",
+			"cloud_id", inst.CloudID, "project_key", req.ProjectKey)
 		return
 	}
 
@@ -117,8 +111,8 @@ func (h *AnalysisHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	actor := r.Header.Get("X-EthicGuard-Actor")
 	jobID, err := h.Jobs.Enqueue(r.Context(), inst.ID, projectID, req.IssueKey, req.Kind, actor)
 	if err != nil {
-		h.Logger.Error("enqueue failed", "err", err, "cloud_id", inst.CloudID, "issue_key", req.IssueKey)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "enqueue failed"})
+		internalErr(w, h.Logger, err, "enqueue failed",
+			"cloud_id", inst.CloudID, "issue_key", req.IssueKey)
 		return
 	}
 

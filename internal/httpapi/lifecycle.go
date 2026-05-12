@@ -38,29 +38,28 @@ func (h *LifecycleHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	claims, err := auth.Verify(token, h.InstallerSecret, auth.AudienceInstaller)
 	if err != nil {
 		h.Logger.Warn("lifecycle auth failed", "err", err)
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		unauthorized(w, "unauthorized")
 		return
 	}
 
 	var req lifecycleReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		badRequest(w, "invalid json")
 		return
 	}
 	if req.CloudID == "" || req.CloudID != claims.CloudID {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cloudId mismatch"})
+		badRequest(w, "cloudId mismatch")
 		return
 	}
 
 	switch req.Event {
 	case "install":
 		if len(req.SharedSecret) < 32 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sharedSecret too short"})
+			badRequest(w, "sharedSecret too short")
 			return
 		}
 		if _, err := h.Installations.Upsert(r.Context(), req.CloudID, req.SharedSecret); err != nil {
-			h.Logger.Error("lifecycle upsert failed", "err", err, "cloud_id", req.CloudID)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "persist failed"})
+			internalErr(w, h.Logger, err, "persist failed", "cloud_id", req.CloudID)
 			return
 		}
 		h.Logger.Info("installation registered", "cloud_id", req.CloudID)
@@ -73,14 +72,13 @@ func (h *LifecycleHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusOK, map[string]string{"status": "not-installed"})
 				return
 			}
-			h.Logger.Error("lifecycle delete failed", "err", err, "cloud_id", req.CloudID)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delete failed"})
+			internalErr(w, h.Logger, err, "delete failed", "cloud_id", req.CloudID)
 			return
 		}
 		h.Logger.Info("installation removed", "cloud_id", req.CloudID)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "uninstalled"})
 
 	default:
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown event"})
+		badRequest(w, "unknown event")
 	}
 }

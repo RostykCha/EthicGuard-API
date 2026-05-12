@@ -58,24 +58,23 @@ type jobResponse struct {
 func (h *JobsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	inst := auth.InstallationFromContext(r.Context())
 	if inst == nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "no installation"})
+		unauthorized(w, "no installation")
 		return
 	}
 	jobIDStr := r.PathValue("jobId")
 	jobID, err := strconv.ParseInt(jobIDStr, 10, 64)
 	if err != nil || jobID <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid jobId"})
+		badRequest(w, "invalid jobId")
 		return
 	}
 
 	job, err := h.Jobs.GetByID(r.Context(), inst.ID, jobID)
 	if err != nil {
 		if store.IsNotFound(err) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
+			notFound(w, "job not found")
 			return
 		}
-		h.Logger.Error("job lookup failed", "err", err, "job_id", jobID)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "job lookup failed"})
+		internalErr(w, h.Logger, err, "job lookup failed", "job_id", jobID)
 		return
 	}
 
@@ -93,8 +92,7 @@ func (h *JobsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if job.Status == store.JobDone {
 		findings, err := h.Findings.ListByJob(r.Context(), job.ID)
 		if err != nil {
-			h.Logger.Error("findings list failed", "err", err, "job_id", jobID)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "findings lookup failed"})
+			internalErr(w, h.Logger, err, "findings lookup failed", "job_id", jobID)
 			return
 		}
 		for _, f := range findings {
@@ -118,23 +116,22 @@ func (h *JobsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *LatestIssueHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	inst := auth.InstallationFromContext(r.Context())
 	if inst == nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "no installation"})
+		unauthorized(w, "no installation")
 		return
 	}
 	issueKey := r.PathValue("issueKey")
 	if issueKey == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "issueKey required"})
+		badRequest(w, "issueKey required")
 		return
 	}
 
 	job, err := h.Jobs.LatestForIssue(r.Context(), inst.ID, issueKey)
 	if err != nil {
 		if store.IsNotFound(err) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "no analysis for issue"})
+			notFound(w, "no analysis for issue")
 			return
 		}
-		h.Logger.Error("latest job lookup failed", "err", err, "issue_key", issueKey)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "latest job lookup failed"})
+		internalErr(w, h.Logger, err, "latest job lookup failed", "issue_key", issueKey)
 		return
 	}
 
@@ -149,8 +146,7 @@ func (h *LatestIssueHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if job.Status == store.JobDone {
 		findings, err := h.Findings.ListByJob(r.Context(), job.ID)
 		if err != nil {
-			h.Logger.Error("findings list failed", "err", err, "job_id", job.ID)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "findings lookup failed"})
+			internalErr(w, h.Logger, err, "findings lookup failed", "job_id", job.ID)
 			return
 		}
 		for _, f := range findings {

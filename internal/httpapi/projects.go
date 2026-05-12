@@ -73,12 +73,12 @@ func defaultConfig(projectKey string) *store.ProjectConfig {
 func (h *ProjectsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	inst := auth.InstallationFromContext(r.Context())
 	if inst == nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "no installation"})
+		unauthorized(w, "no installation")
 		return
 	}
 	projectKey := strings.TrimSpace(r.PathValue("projectKey"))
 	if projectKey == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "projectKey required"})
+		badRequest(w, "projectKey required")
 		return
 	}
 
@@ -88,8 +88,7 @@ func (h *ProjectsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut:
 		h.handlePut(w, r, inst, projectKey)
 	default:
-		w.Header().Set("Allow", "GET, PUT")
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		methodNotAllowed(w, "GET, PUT", "method not allowed")
 	}
 }
 
@@ -100,9 +99,8 @@ func (h *ProjectsHandler) handleGet(w http.ResponseWriter, r *http.Request, inst
 			writeJSON(w, http.StatusOK, configToResponse(defaultConfig(projectKey)))
 			return
 		}
-		h.Logger.Error("projects get config failed",
-			"err", err, "cloud_id", inst.CloudID, "project_key", projectKey)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "config lookup failed"})
+		internalErr(w, h.Logger, err, "config lookup failed",
+			"cloud_id", inst.CloudID, "project_key", projectKey)
 		return
 	}
 	writeJSON(w, http.StatusOK, configToResponse(cfg))
@@ -111,12 +109,12 @@ func (h *ProjectsHandler) handleGet(w http.ResponseWriter, r *http.Request, inst
 func (h *ProjectsHandler) handlePut(w http.ResponseWriter, r *http.Request, inst *store.Installation, projectKey string) {
 	var req putConfigRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		badRequest(w, "invalid json")
 		return
 	}
 	types, errMsg := sanitizeIssueTypes(req.TestedIssueTypes)
 	if errMsg != "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
+		badRequest(w, errMsg)
 		return
 	}
 
@@ -125,9 +123,8 @@ func (h *ProjectsHandler) handlePut(w http.ResponseWriter, r *http.Request, inst
 	existing, err := h.Projects.GetConfig(r.Context(), inst.ID, projectKey)
 	if err != nil {
 		if !store.IsNotFound(err) {
-			h.Logger.Error("projects get config failed before put",
-				"err", err, "cloud_id", inst.CloudID, "project_key", projectKey)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "config lookup failed"})
+			internalErr(w, h.Logger, err, "config lookup failed",
+				"cloud_id", inst.CloudID, "project_key", projectKey)
 			return
 		}
 		existing = defaultConfig(projectKey)
@@ -145,13 +142,13 @@ func (h *ProjectsHandler) handlePut(w http.ResponseWriter, r *http.Request, inst
 	}
 	if req.AgentSeverityThreshold != "" {
 		if !isValidSeverity(req.AgentSeverityThreshold) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid agentSeverityThreshold"})
+			badRequest(w, "invalid agentSeverityThreshold")
 			return
 		}
 		merged.AgentSeverityThreshold = req.AgentSeverityThreshold
 	}
 	if len(req.AgentPromptAddendum) > maxPromptAddendumBytes {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "agentPromptAddendum too long"})
+		badRequest(w, "agentPromptAddendum too long")
 		return
 	}
 	// Empty string is a valid explicit clear; we always overwrite the addendum
@@ -160,9 +157,8 @@ func (h *ProjectsHandler) handlePut(w http.ResponseWriter, r *http.Request, inst
 
 	cfg, err := h.Projects.SetConfig(r.Context(), inst.ID, projectKey, merged)
 	if err != nil {
-		h.Logger.Error("projects set config failed",
-			"err", err, "cloud_id", inst.CloudID, "project_key", projectKey)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "config update failed"})
+		internalErr(w, h.Logger, err, "config update failed",
+			"cloud_id", inst.CloudID, "project_key", projectKey)
 		return
 	}
 
