@@ -29,10 +29,10 @@ cover-check:
 	go run ./scripts/cover-check -profile coverage.out -floor 70 -enforce
 
 # One-shot "is this PR ready" check. Mirrors the three steps in CLAUDE.md
-# "Definition of done" + a coverage report. The floor is reported but NOT
-# enforced until store/llm/httpapi coverage is backfilled — see the
-# iteration plan. Swap `cover` -> `cover-check` here to enforce.
-verify: build test-race lint cover
+# "Definition of done" plus the per-package coverage floor (70%). The floor
+# fails the build on regressions; excluded packages live in
+# scripts/cover-check/main.go.
+verify: build test-race lint cover-check
 
 run:
 	go run ./cmd/ethicguard-api

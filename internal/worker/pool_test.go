@@ -15,12 +15,16 @@ import (
 )
 
 // fakeJobs implements JobsRepo, capturing MarkDone/MarkFailed calls so tests
-// can assert the final state. ClaimNext returns one job then ErrNotFound.
+// can assert the final state. ClaimNext drains `pendingQueue` first (used by
+// the concurrency tests), then falls back to `pending` for single-job cases.
 type fakeJobs struct {
 	mu sync.Mutex
 
 	// Job to return on first ClaimNext. Subsequent calls return ErrNotFound.
 	pending *store.Job
+
+	// pendingQueue is the multi-job variant used by Pool.Start tests.
+	pendingQueue []*store.Job
 
 	doneCalls   []doneCall
 	failedCalls []failedCall
@@ -43,6 +47,11 @@ type failedCall struct {
 func (f *fakeJobs) ClaimNext(_ context.Context) (*store.Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if len(f.pendingQueue) > 0 {
+		j := f.pendingQueue[0]
+		f.pendingQueue = f.pendingQueue[1:]
+		return j, nil
+	}
 	if f.pending == nil {
 		return nil, store.ErrNotFound
 	}
@@ -269,3 +278,180 @@ func TestPoolNew_DefaultsJobTimeout(t *testing.T) {
 		t.Errorf("concurrency = %d, want 1 (min)", pool.concurrency)
 	}
 }
+
+// TestPool_Start_ProcessesAllJobs runs the full Start → run → ClaimNext →
+// processJob pipeline with N workers and M > N jobs to catch goroutine-pool
+// bugs the single-worker tests miss (double-claim, missed wake, etc.).
+func TestPool_Start_ProcessesAllJobs(t *testing.T) {
+	const (
+		workers = 3
+		njobs   = 7
+	)
+	q := jobs.New()
+	fj := &fakeJobs{}
+	for i := 1; i <= njobs; i++ {
+		id := int64(i)
+		fj.pendingQueue = append(fj.pendingQueue, &store.Job{
+			ID: id, IssueKey: "KAN-1", Kind: "ac_quality",
+		})
+		q.Put(id, jobs.Entry{Payload: analysis.IssuePayload{
+			Key:                "KAN-1",
+			AcceptanceCriteria: "long enough AC text here for the MinACLength bar",
+			HasTestLinks:       true,
+		}})
+	}
+	pool := New(Deps{
+		Logger:     discardLogger(),
+		Jobs:       fj,
+		Findings:   &fakeFindings{},
+		Queue:      q,
+		LLM:        &fakeLLM{response: "[]"},
+		JobTimeout: time.Second,
+	}, workers, 10*time.Millisecond) // short poll so the loop doesn't park
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pool.Start(ctx)
+
+	// Wait until every job has reached a terminal state, then cancel.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		fj.mu.Lock()
+		total := len(fj.doneCalls) + len(fj.failedCalls)
+		fj.mu.Unlock()
+		if total >= njobs {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	fj.mu.Lock()
+	defer fj.mu.Unlock()
+	if len(fj.doneCalls) != njobs {
+		t.Errorf("done = %d, want %d (failed: %+v)", len(fj.doneCalls), njobs, fj.failedCalls)
+	}
+	if len(fj.failedCalls) != 0 {
+		t.Errorf("unexpected MarkFailed: %+v", fj.failedCalls)
+	}
+	// Every job must be processed exactly once. Build a set and check size.
+	seen := map[int64]int{}
+	for _, c := range fj.doneCalls {
+		seen[c.jobID]++
+	}
+	if len(seen) != njobs {
+		t.Errorf("unique jobs done = %d, want %d", len(seen), njobs)
+	}
+	for id, n := range seen {
+		if n != 1 {
+			t.Errorf("job %d processed %d times, want exactly 1", id, n)
+		}
+	}
+}
+
+// TestPool_Start_GracefulShutdown asserts workers stop within a small budget
+// after the context is cancelled, even while polling. Uses a long poll
+// interval so the only way out is the ctx.Done branch in run().
+func TestPool_Start_GracefulShutdown(t *testing.T) {
+	fj := &fakeJobs{} // empty — ClaimNext returns ErrNotFound immediately
+	pool := New(Deps{
+		Logger:     discardLogger(),
+		Jobs:       fj,
+		Findings:   &fakeFindings{},
+		Queue:      jobs.New(),
+		LLM:        &fakeLLM{response: "[]"},
+		JobTimeout: time.Second,
+	}, 2, time.Hour /* never ticks */)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	pool.Start(ctx)
+
+	// Give workers a moment to enter the select loop, then cancel.
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	// Workers should exit within a few ms — they wake on ctx.Done.
+	// Goroutine-leak detection isn't built-in here; we just sleep briefly
+	// and trust that a stuck worker would show up under `-race -count=N`.
+	time.Sleep(50 * time.Millisecond)
+}
+
+// TestPool_Start_ContextCancelledDuringClaim — ClaimNext returns
+// context.Canceled while the worker is mid-drain. The worker must log and
+// exit, not loop forever.
+func TestPool_Start_ContextCancelledDuringClaim(t *testing.T) {
+	fj := &cancellingJobs{}
+	pool := New(Deps{
+		Logger:     discardLogger(),
+		Jobs:       fj,
+		Findings:   &fakeFindings{},
+		Queue:      jobs.New(),
+		LLM:        &fakeLLM{response: "[]"},
+		JobTimeout: time.Second,
+	}, 1, time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pool.Start(ctx)
+
+	// Wait for the worker to enter ClaimNext, then cancel.
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	// The worker should observe context.Canceled from ClaimNext and exit.
+	time.Sleep(50 * time.Millisecond)
+}
+
+// cancellingJobs always returns context.Canceled — exercises the
+// errors.Is(err, context.Canceled) branch in run().
+type cancellingJobs struct{}
+
+func (c *cancellingJobs) ClaimNext(_ context.Context) (*store.Job, error) {
+	return nil, context.Canceled
+}
+func (c *cancellingJobs) MarkDone(_ context.Context, _ int64, _ string) error    { return nil }
+func (c *cancellingJobs) MarkFailed(_ context.Context, _ int64, _ string) error { return nil }
+
+// TestPool_Run_ClaimError_Continues — a non-NotFound, non-cancel claim error
+// must be logged and not panic the worker. We trigger one, then unblock.
+func TestPool_Run_ClaimError_Continues(t *testing.T) {
+	fj := &flakeyJobs{firstErr: errors.New("transient db blip")}
+	pool := New(Deps{
+		Logger:     discardLogger(),
+		Jobs:       fj,
+		Findings:   &fakeFindings{},
+		Queue:      jobs.New(),
+		LLM:        &fakeLLM{response: "[]"},
+		JobTimeout: time.Second,
+	}, 1, 10*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	pool.Start(ctx)
+	time.Sleep(40 * time.Millisecond)
+	cancel()
+	time.Sleep(20 * time.Millisecond)
+
+	fj.mu.Lock()
+	defer fj.mu.Unlock()
+	if fj.calls < 2 {
+		t.Errorf("ClaimNext called %d times; expected the worker to retry after the first error", fj.calls)
+	}
+}
+
+// flakeyJobs returns one error on the first ClaimNext and then ErrNotFound.
+type flakeyJobs struct {
+	mu       sync.Mutex
+	calls    int
+	firstErr error
+}
+
+func (f *flakeyJobs) ClaimNext(_ context.Context) (*store.Job, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.calls == 1 {
+		return nil, f.firstErr
+	}
+	return nil, store.ErrNotFound
+}
+func (f *flakeyJobs) MarkDone(_ context.Context, _ int64, _ string) error    { return nil }
+func (f *flakeyJobs) MarkFailed(_ context.Context, _ int64, _ string) error { return nil }

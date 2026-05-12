@@ -180,12 +180,20 @@ source of truth. **That file does not yet exist.** Until it does:
 
 Before claiming a task complete:
 
-1. `make verify` is green (runs `go build ./... && go test -race -count=1 ./... && golangci-lint run`).
+1. `make verify` is green. Runs `go build ./...`, `go test -race -count=1 ./...`,
+   `golangci-lint run`, and the per-package coverage gate (`make cover-check`),
+   which fails on any covered package below the **70% floor**. Excluded
+   packages live in [scripts/cover-check/main.go](scripts/cover-check/main.go);
+   add a new exclusion only with a justification in this file's "Code
+   conventions" section.
 2. New behavior has tests; new schema has a migration.
 3. If the change touches storage or LLM calls, the commit body says so.
 
 If you can't run any of these (e.g. no DB available locally), say so
 explicitly in the response — do not claim "tests pass" when you skipped them.
+
+**70% is a floor, not a target.** Reviews still look at *what* is tested, not
+just the percentage — the gate stops drift, it doesn't guarantee quality.
 
 ## Files you should know
 
