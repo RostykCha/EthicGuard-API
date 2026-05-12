@@ -110,6 +110,33 @@ func TestFilterBySeverity(t *testing.T) {
 	}
 }
 
+func TestSeverityAtLeast(t *testing.T) {
+	cases := []struct {
+		name      string
+		s         Severity
+		threshold Severity
+		want      bool
+	}{
+		{"high meets high", Severity(SeverityHigh), Severity(SeverityHigh), true},
+		{"high meets medium", Severity(SeverityHigh), Severity(SeverityMedium), true},
+		{"medium below high", Severity(SeverityMedium), Severity(SeverityHigh), false},
+		{"low meets info", Severity(SeverityLow), Severity(SeverityInfo), true},
+		{"info below low", Severity(SeverityInfo), Severity(SeverityLow), false},
+		{"info meets info", Severity(SeverityInfo), Severity(SeverityInfo), true},
+		{"unknown s rejected", Severity("critical"), Severity(SeverityHigh), false},
+		{"unknown threshold rejected", Severity(SeverityHigh), Severity("none"), false},
+		{"both unknown rejected", Severity("a"), Severity("b"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.s.AtLeast(tc.threshold); got != tc.want {
+				t.Errorf("Severity(%q).AtLeast(%q) = %v, want %v",
+					tc.s, tc.threshold, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestMessageCatalog(t *testing.T) {
 	// Sanity check: every category × severity combo the LLM is allowed to
 	// emit must have a catalog entry. If you add a new category to the system

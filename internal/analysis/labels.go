@@ -18,6 +18,9 @@ const (
 const MinACLength = 20
 
 // Severity levels (mirrors what the LLM emits and the schema constrains).
+// Kept as untyped string constants so wire types (Finding.Severity, store
+// columns, test fixtures) interoperate without conversion. The typed
+// Severity below exists only for the rank table.
 const (
 	SeverityHigh   = "high"
 	SeverityMedium = "medium"
@@ -25,36 +28,53 @@ const (
 	SeverityInfo   = "info"
 )
 
-// severityRank gives a comparable integer for severity strings; unknown
-// values land below "info" so they're dropped by any non-empty threshold.
-func severityRank(s string) int {
-	switch s {
-	case SeverityHigh:
-		return 4
-	case SeverityMedium:
-		return 3
-	case SeverityLow:
-		return 2
-	case SeverityInfo:
-		return 1
+// Severity is a typed view used for ordering comparisons. Construct from a
+// string at the boundary; never re-type the wire fields.
+type Severity string
+
+// severityRanks is the canonical ordering. Unknown values rank 0 so they're
+// dropped by any non-empty threshold — keeps a future typo in the model
+// output from silently slipping past a "medium" gate.
+var severityRanks = map[Severity]int{
+	Severity(SeverityHigh):   4,
+	Severity(SeverityMedium): 3,
+	Severity(SeverityLow):    2,
+	Severity(SeverityInfo):   1,
+}
+
+// Rank returns the integer rank for s. Returns 0 for any token outside the
+// canonical four — the caller decides what that means.
+func (s Severity) Rank() int {
+	return severityRanks[s]
+}
+
+// AtLeast reports whether s meets or exceeds the threshold. Unknown s or
+// threshold values are treated as "below everything" — see the test cases
+// in labels_test.go for the exact semantics.
+func (s Severity) AtLeast(threshold Severity) bool {
+	r := s.Rank()
+	t := threshold.Rank()
+	if r == 0 || t == 0 {
+		return false
 	}
-	return 0
+	return r >= t
 }
 
 // FilterBySeverity returns the subset of findings whose severity is at least
 // the given threshold. Empty or unknown threshold passes everything through
-// unchanged.
+// unchanged — matches the project-config default ("medium" applies; "" or
+// "critical" means "no filter").
 func FilterBySeverity(in []Finding, threshold string) []Finding {
 	if threshold == "" {
 		return in
 	}
-	minRank := severityRank(threshold)
-	if minRank <= 0 {
+	t := Severity(threshold)
+	if t.Rank() == 0 {
 		return in
 	}
 	out := make([]Finding, 0, len(in))
 	for _, f := range in {
-		if severityRank(f.Severity) >= minRank {
+		if Severity(f.Severity).AtLeast(t) {
 			out = append(out, f)
 		}
 	}
