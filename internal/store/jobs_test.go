@@ -31,6 +31,13 @@ const jobsClaimNextSQL = `
 			          COALESCE(result_label, ''), created_at, started_at, finished_at
 		`
 
+const jobsRecordCompletedSQL = `
+		INSERT INTO jobs (installation_id, project_id, issue_key, kind, status,
+		                  result_label, started_at, finished_at)
+		VALUES ($1, $2, $3, $4, 'done', $5, NOW(), NOW())
+		RETURNING id
+	`
+
 const jobsMarkDoneSQL = `
 			UPDATE jobs
 			SET status = 'done', finished_at = NOW(), result_label = $2, error = NULL
@@ -251,5 +258,33 @@ func TestJobs_LatestForIssue_NotFound(t *testing.T) {
 	_, err := r.LatestForIssue(context.Background(), 2, "KAN-1")
 	if !IsNotFound(err) {
 		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestJobs_RecordCompleted(t *testing.T) {
+	s, mock := newMockStore(t)
+	mock.ExpectQuery(jobsRecordCompletedSQL).
+		WithArgs(int64(1), int64(2), "KAN-1", "ac_quality", "AC-verified").
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(int64(77)))
+
+	r := &Jobs{Store: s}
+	id, err := r.RecordCompleted(context.Background(), 1, 2, "KAN-1", "ac_quality", "AC-verified")
+	if err != nil {
+		t.Fatalf("RecordCompleted: %v", err)
+	}
+	if id != 77 {
+		t.Errorf("id = %d, want 77", id)
+	}
+}
+
+func TestJobs_RecordCompleted_Error(t *testing.T) {
+	s, mock := newMockStore(t)
+	mock.ExpectQuery(jobsRecordCompletedSQL).
+		WithArgs(int64(1), int64(2), "KAN-1", "ac_quality", "AC-defect").
+		WillReturnError(errors.New("boom"))
+
+	r := &Jobs{Store: s}
+	if _, err := r.RecordCompleted(context.Background(), 1, 2, "KAN-1", "ac_quality", "AC-defect"); err == nil {
+		t.Fatal("expected error")
 	}
 }

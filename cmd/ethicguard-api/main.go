@@ -143,6 +143,7 @@ func main() {
 	}
 	if findingsRepo != nil {
 		deps.Findings = findingsRepo
+		deps.FindingsWriter = findingsRepo
 	}
 	router := httpapi.NewRouter(deps)
 

@@ -21,12 +21,16 @@ import (
 // LLM is wired into the worker pool now (not the analysis handler), so it
 // isn't carried here.
 type Deps struct {
-	Logger          *slog.Logger
-	Installations   *store.Installations
-	Projects        ProjectsRepoFull
-	Audits          AuditsRepo
-	Jobs            JobsRepo
-	Findings        FindingsRepo
+	Logger        *slog.Logger
+	Installations *store.Installations
+	Projects      ProjectsRepoFull
+	Audits        AuditsRepo
+	Jobs          JobsRepo
+	Findings      FindingsRepo
+	// FindingsWriter is the write side of the findings repo, used by the
+	// /v1/analysis/results endpoint. Kept separate from FindingsRepo so the
+	// read-only GET handlers can't accidentally insert.
+	FindingsWriter  PersistedFindingsRepo
 	Queue           PayloadEnqueuer
 	InstallerSecret string
 	JWTAudience     string
@@ -64,6 +68,20 @@ func NewRouter(d Deps) http.Handler {
 			Queue:    d.Queue,
 		}
 		authed.Handle("POST /v1/analysis", analysisH)
+	}
+	// POST /v1/analysis/results — Rovo-stamped verdicts persisted by the
+	// Forge stampLabel resolver. Requires the concrete *store.Jobs (for
+	// RecordCompleted) and the findings repo. The async-path AnalysisHandler
+	// only knows about Enqueue / GetByID, so we wire this with the same
+	// d.Jobs interface, narrowed to ResultsJobsRepo at the field.
+	if results, ok := d.Jobs.(ResultsJobsRepo); ok && d.Projects != nil && d.FindingsWriter != nil {
+		resultsH := &AnalysisResultsHandler{
+			Logger:   d.Logger,
+			Jobs:     results,
+			Projects: d.Projects,
+			Findings: d.FindingsWriter,
+		}
+		authed.Handle("POST /v1/analysis/results", resultsH)
 	}
 	if d.Jobs != nil && d.Findings != nil {
 		jobsH := &JobsHandler{Logger: d.Logger, Jobs: d.Jobs, Findings: d.Findings}

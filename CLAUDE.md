@@ -136,6 +136,27 @@ almost certainly "store an anchor and a message key."
 
 ## LLM integration rules
 
+**As of the Rovo-as-brain pivot, the per-issue analysis path no longer runs
+through this API.** Atlassian Rovo (declared in
+`EthicGuard-UI/manifest.yml`) does the analysis itself; the UI's
+`stampLabel` resolver POSTs the result to
+[POST /v1/analysis/results](internal/httpapi/analysis.go) for persistence.
+
+That makes the following packages **orphaned for the per-issue path but
+kept for future batch work** (cross-issue conflict detection, project-wide
+re-scans):
+
+- `internal/llm` — the Anthropic SDK wrapper. No callers from the per-issue
+  path. Future batch worker re-uses it as-is.
+- `internal/analysis` — `Run`, `RunOptions`, prompt construction. Same:
+  orphaned now, batch reuses.
+- `internal/worker` — the goroutine pool that drains `POST /v1/analysis`
+  enqueues. Still wired in `cmd/ethicguard-api`; no per-issue traffic
+  reaches it post-pivot.
+
+The rules below still apply when (a) batch work resumes or (b) you touch
+any of those packages:
+
 - Use the **`claude-api` skill** when writing or debugging code in
   `internal/llm` or `internal/analysis`.
 - Default model: `claude-sonnet-4-6`. `claude-opus-4-6` only when a policy

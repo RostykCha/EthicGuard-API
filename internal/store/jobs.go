@@ -100,6 +100,25 @@ func (r *Jobs) MarkDone(ctx context.Context, jobID int64, resultLabel string) er
 	return nil
 }
 
+// RecordCompleted inserts a new job already in 'done' state, used when the
+// analysis happened outside the worker (e.g. Rovo stamped a verdict via the
+// stamp-label resolver). Same schema as Enqueue + MarkDone, but in one
+// statement so the job never transits through 'queued' — there's no payload
+// in memory for the worker to claim.
+func (r *Jobs) RecordCompleted(ctx context.Context, installationID, projectID int64, issueKey, kind, resultLabel string) (int64, error) {
+	const q = `
+		INSERT INTO jobs (installation_id, project_id, issue_key, kind, status,
+		                  result_label, started_at, finished_at)
+		VALUES ($1, $2, $3, $4, 'done', $5, NOW(), NOW())
+		RETURNING id
+	`
+	var id int64
+	if err := r.Store.DB.QueryRow(ctx, q, installationID, projectID, issueKey, kind, resultLabel).Scan(&id); err != nil {
+		return 0, fmt.Errorf("jobs record completed: %w", err)
+	}
+	return id, nil
+}
+
 // MarkFailed sets status='failed' and stores a stable error CODE (never an
 // LLM-raw error message) so we don't leak issue content into Postgres.
 func (r *Jobs) MarkFailed(ctx context.Context, jobID int64, errCode string) error {
