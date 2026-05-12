@@ -18,16 +18,38 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 )
 
+// messageSender is the narrow slice of the Anthropic SDK we use. Defined
+// here so tests can substitute a fake without depending on the SDK's
+// runtime shape. The production implementation wraps anthropic.Client.
+type messageSender interface {
+	New(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error)
+}
+
+// sdkSender is the production adapter — forwards to the real SDK.
+type sdkSender struct{ inner anthropic.Client }
+
+func (s sdkSender) New(ctx context.Context, p anthropic.MessageNewParams) (*anthropic.Message, error) {
+	return s.inner.Messages.New(ctx, p)
+}
+
 // Client wraps the Anthropic SDK for EthicGuard's analysis calls.
 type Client struct {
-	inner anthropic.Client
-	model string
+	sender messageSender
+	model  string
 }
 
 // New creates an LLM client for the given model.
 func New(apiKey, model string) *Client {
-	client := anthropic.NewClient(option.WithAPIKey(apiKey))
-	return &Client{inner: client, model: model}
+	return &Client{
+		sender: sdkSender{inner: anthropic.NewClient(option.WithAPIKey(apiKey))},
+		model:  model,
+	}
+}
+
+// newClientWithSender lets tests inject a fake messageSender. Not exported —
+// production code goes through New.
+func newClientWithSender(s messageSender, model string) *Client {
+	return &Client{sender: s, model: model}
 }
 
 // Analyze sends a system prompt + optional non-cached addendum + user content
@@ -49,7 +71,7 @@ func (c *Client) Analyze(ctx context.Context, systemPrompt, systemAddendum, user
 		system = append(system, anthropic.TextBlockParam{Text: systemAddendum})
 	}
 
-	msg, err := c.inner.Messages.New(ctx, anthropic.MessageNewParams{
+	msg, err := c.sender.New(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.Model(c.model),
 		MaxTokens: 4096,
 		System:    system,
@@ -60,10 +82,13 @@ func (c *Client) Analyze(ctx context.Context, systemPrompt, systemAddendum, user
 	if err != nil {
 		return "", fmt.Errorf("llm analyze: %w", err)
 	}
+	// Concatenate every text block's text. We read the union's exposed
+	// `Type` + `Text` fields rather than the SDK's `AsAny()` dispatch so
+	// the path is unit-testable from a hand-constructed Message.
 	var sb strings.Builder
 	for _, block := range msg.Content {
-		if v, ok := block.AsAny().(anthropic.TextBlock); ok {
-			sb.WriteString(v.Text)
+		if block.Type == "text" {
+			sb.WriteString(block.Text)
 		}
 	}
 	return sb.String(), nil
