@@ -51,7 +51,7 @@ func (r *Jobs) Enqueue(ctx context.Context, installationID, projectID int64, iss
 		RETURNING id
 	`
 	var id int64
-	if err := r.Store.Pool.QueryRow(ctx, q, installationID, projectID, issueKey, kind, requestedBy).Scan(&id); err != nil {
+	if err := r.Store.DB.QueryRow(ctx, q, installationID, projectID, issueKey, kind, requestedBy).Scan(&id); err != nil {
 		return 0, fmt.Errorf("jobs enqueue: %w", err)
 	}
 	return id, nil
@@ -75,7 +75,7 @@ func (r *Jobs) ClaimNext(ctx context.Context) (*Job, error) {
 		          COALESCE(error, ''), COALESCE(requested_by_account_id, ''),
 		          COALESCE(result_label, ''), created_at, started_at, finished_at
 	`
-	row := r.Store.Pool.QueryRow(ctx, q)
+	row := r.Store.DB.QueryRow(ctx, q)
 	job := &Job{}
 	if err := scanJob(row, job); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -94,7 +94,7 @@ func (r *Jobs) MarkDone(ctx context.Context, jobID int64, resultLabel string) er
 		SET status = 'done', finished_at = NOW(), result_label = $2, error = NULL
 		WHERE id = $1
 	`
-	if _, err := r.Store.Pool.Exec(ctx, q, jobID, resultLabel); err != nil {
+	if _, err := r.Store.DB.Exec(ctx, q, jobID, resultLabel); err != nil {
 		return fmt.Errorf("jobs mark done: %w", err)
 	}
 	return nil
@@ -108,7 +108,7 @@ func (r *Jobs) MarkFailed(ctx context.Context, jobID int64, errCode string) erro
 		SET status = 'failed', finished_at = NOW(), error = $2
 		WHERE id = $1
 	`
-	if _, err := r.Store.Pool.Exec(ctx, q, jobID, errCode); err != nil {
+	if _, err := r.Store.DB.Exec(ctx, q, jobID, errCode); err != nil {
 		return fmt.Errorf("jobs mark failed: %w", err)
 	}
 	return nil
@@ -124,7 +124,7 @@ func (r *Jobs) GetByID(ctx context.Context, installationID, jobID int64) (*Job, 
 		FROM jobs
 		WHERE id = $1 AND installation_id = $2
 	`
-	row := r.Store.Pool.QueryRow(ctx, q, jobID, installationID)
+	row := r.Store.DB.QueryRow(ctx, q, jobID, installationID)
 	job := &Job{}
 	if err := scanJob(row, job); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -147,7 +147,7 @@ func (r *Jobs) LatestForIssue(ctx context.Context, installationID int64, issueKe
 		ORDER BY created_at DESC
 		LIMIT 1
 	`
-	row := r.Store.Pool.QueryRow(ctx, q, installationID, issueKey)
+	row := r.Store.DB.QueryRow(ctx, q, installationID, issueKey)
 	job := &Job{}
 	if err := scanJob(row, job); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

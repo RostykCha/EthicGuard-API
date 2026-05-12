@@ -38,7 +38,7 @@ func (r *Projects) Upsert(ctx context.Context, installationID int64, projectKey 
 		RETURNING id
 	`
 	var id int64
-	if err := r.Store.Pool.QueryRow(ctx, q, installationID, projectKey).Scan(&id); err != nil {
+	if err := r.Store.DB.QueryRow(ctx, q, installationID, projectKey).Scan(&id); err != nil {
 		return 0, fmt.Errorf("projects upsert: %w", err)
 	}
 	return id, nil
@@ -54,7 +54,7 @@ func (r *Projects) GetConfig(ctx context.Context, installationID int64, projectK
 		FROM projects
 		WHERE installation_id = $1 AND project_key = $2
 	`
-	row := r.Store.Pool.QueryRow(ctx, q, installationID, projectKey)
+	row := r.Store.DB.QueryRow(ctx, q, installationID, projectKey)
 	cfg := &ProjectConfig{}
 	if err := row.Scan(
 		&cfg.ProjectKey, &cfg.TestedIssueTypes,
@@ -91,7 +91,7 @@ func (r *Projects) SetConfig(ctx context.Context, installationID int64, projectK
 		RETURNING project_key, tested_issue_types,
 		          agent_enabled, agent_severity_threshold, agent_prompt_addendum
 	`
-	row := r.Store.Pool.QueryRow(ctx, q,
+	row := r.Store.DB.QueryRow(ctx, q,
 		installationID, projectKey,
 		types,
 		in.AgentEnabled, in.AgentSeverityThreshold, in.AgentPromptAddendum,

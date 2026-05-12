@@ -30,7 +30,7 @@ func (r *Audits) Log(ctx context.Context, installationID int64, actorAccountID, 
 		INSERT INTO audit_log (installation_id, actor_account_id, action, target, meta)
 		VALUES ($1, NULLIF($2, ''), $3, NULLIF($4, ''), $5)
 	`
-	if _, err := r.Store.Pool.Exec(ctx, q, installationID, actorAccountID, action, target, metaJSON); err != nil {
+	if _, err := r.Store.DB.Exec(ctx, q, installationID, actorAccountID, action, target, metaJSON); err != nil {
 		return fmt.Errorf("audit log insert: %w", err)
 	}
 	return nil

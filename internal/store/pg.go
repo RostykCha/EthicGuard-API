@@ -13,6 +13,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 )
@@ -20,9 +22,29 @@ import (
 // ErrNotFound is returned by repositories when a row lookup misses.
 var ErrNotFound = errors.New("store: not found")
 
+// Querier is the narrow slice of pgxpool.Pool the repositories actually
+// use. Declared here so tests can substitute pgxmock without touching
+// production code. The interface deliberately stays minimal — adding a
+// method here means every repo can depend on it, so keep it small.
+//
+// Both *pgxpool.Pool (production) and *pgxmock.PgxPoolIface (tests)
+// satisfy these signatures.
+type Querier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
 // Store owns the pgx connection pool shared across all repositories.
+//
+// DB is what repositories use for queries — typed as Querier so tests
+// can fake it. pool is the concrete pgx pool, retained for SQLDB() which
+// is called only by Migrate() and requires the real pgx implementation.
+// In test setups that build Store{DB: pgxmock.NewPool()}, pool is nil
+// and SQLDB() must not be called.
 type Store struct {
-	Pool *pgxpool.Pool
+	DB   Querier
+	pool *pgxpool.Pool
 }
 
 // Open dials Postgres, pings it, and returns a ready-to-use Store. The caller
@@ -49,21 +71,27 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("store: ping: %w", err)
 	}
-	return &Store{Pool: pool}, nil
+	return &Store{DB: pool, pool: pool}, nil
 }
 
-// Close releases pool resources.
+// Close releases pool resources. No-op when the store was constructed with
+// a fake (pool is nil in tests using pgxmock).
 func (s *Store) Close() {
-	if s != nil && s.Pool != nil {
-		s.Pool.Close()
+	if s != nil && s.pool != nil {
+		s.pool.Close()
 	}
 }
 
 // SQLDB returns a *sql.DB view of the pool, required by goose which speaks
 // database/sql. The returned handle shares the underlying pgx connections via
-// pgx's stdlib driver — callers must not Close() it.
+// pgx's stdlib driver — callers must not Close() it. Panics if Store was
+// constructed without a concrete pool (test setups using pgxmock should
+// bypass Migrate and never call SQLDB).
 func (s *Store) SQLDB() *sql.DB {
-	return stdlib.OpenDBFromPool(s.Pool)
+	if s.pool == nil {
+		panic("store: SQLDB requires a concrete pgxpool.Pool (not available in test fakes)")
+	}
+	return stdlib.OpenDBFromPool(s.pool)
 }
 
 // LogAttrs returns slog attrs useful when logging around store operations.

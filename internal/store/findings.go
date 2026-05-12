@@ -64,7 +64,7 @@ func (r *Findings) InsertBatch(ctx context.Context, jobID int64, findings []Pers
 		FROM UNNEST($2::TEXT[], $3::TEXT[], $4::SMALLINT[], $5::TEXT[], $6::TEXT[])
 		     AS u(c, s, sc, a, m)
 	`
-	if _, err := r.Store.Pool.Exec(ctx, q, jobID, categories, severities, scores, anchors, messageKeys); err != nil {
+	if _, err := r.Store.DB.Exec(ctx, q, jobID, categories, severities, scores, anchors, messageKeys); err != nil {
 		return fmt.Errorf("findings insert: %w", err)
 	}
 	return nil
@@ -78,7 +78,7 @@ func (r *Findings) ListByJob(ctx context.Context, jobID int64) ([]PersistedFindi
 		WHERE job_id = $1
 		ORDER BY id
 	`
-	rows, err := r.Store.Pool.Query(ctx, q, jobID)
+	rows, err := r.Store.DB.Query(ctx, q, jobID)
 	if err != nil {
 		return nil, fmt.Errorf("findings list: %w", err)
 	}

@@ -34,7 +34,7 @@ func (r *Installations) Upsert(ctx context.Context, cloudID, sharedSecret string
 		    updated_at    = NOW()
 		RETURNING id, cloud_id, shared_secret
 	`
-	row := r.Store.Pool.QueryRow(ctx, q, cloudID, sharedSecret)
+	row := r.Store.DB.QueryRow(ctx, q, cloudID, sharedSecret)
 	inst := &Installation{}
 	if err := row.Scan(&inst.ID, &inst.CloudID, &inst.SharedSecret); err != nil {
 		return nil, fmt.Errorf("installations upsert: %w", err)
@@ -45,7 +45,7 @@ func (r *Installations) Upsert(ctx context.Context, cloudID, sharedSecret string
 // GetByCloudID returns the installation for a given cloudId, or ErrNotFound.
 func (r *Installations) GetByCloudID(ctx context.Context, cloudID string) (*Installation, error) {
 	const q = `SELECT id, cloud_id, shared_secret FROM installations WHERE cloud_id = $1`
-	row := r.Store.Pool.QueryRow(ctx, q, cloudID)
+	row := r.Store.DB.QueryRow(ctx, q, cloudID)
 	inst := &Installation{}
 	if err := row.Scan(&inst.ID, &inst.CloudID, &inst.SharedSecret); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -62,7 +62,7 @@ func (r *Installations) GetByCloudID(ctx context.Context, cloudID string) (*Inst
 // zero-retention "nothing recoverable after uninstall" guarantee.
 func (r *Installations) DeleteByCloudID(ctx context.Context, cloudID string) error {
 	const q = `DELETE FROM installations WHERE cloud_id = $1`
-	tag, err := r.Store.Pool.Exec(ctx, q, cloudID)
+	tag, err := r.Store.DB.Exec(ctx, q, cloudID)
 	if err != nil {
 		return fmt.Errorf("installations delete: %w", err)
 	}
