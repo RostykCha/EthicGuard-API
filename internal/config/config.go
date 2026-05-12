@@ -1,3 +1,11 @@
+// Package config is the single source of truth for every environment
+// variable EthicGuard-API reads. main.go calls Load() once at startup and
+// passes the resulting struct down; nothing else in the codebase should
+// read os.Getenv directly.
+//
+// Invariant: when in env != "dev", required fields (database URL, Anthropic
+// key, installer secret) must be present — Load returns an error rather
+// than silently defaulting.
 package config
 
 import (

@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -71,7 +70,7 @@ func (h *JobsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	job, err := h.Jobs.GetByID(r.Context(), inst.ID, jobID)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
+		if store.IsNotFound(err) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
 			return
 		}
@@ -130,7 +129,7 @@ func (h *LatestIssueHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	job, err := h.Jobs.LatestForIssue(r.Context(), inst.ID, issueKey)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
+		if store.IsNotFound(err) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "no analysis for issue"})
 			return
 		}

@@ -61,7 +61,7 @@ func Middleware(logger *slog.Logger, installations MiddlewareDeps, audience stri
 			}
 			inst, err := installations.GetByCloudID(r.Context(), cloudID)
 			if err != nil {
-				if errors.Is(err, store.ErrNotFound) {
+				if store.IsNotFound(err) {
 					writeAuthError(w, "unknown installation")
 					return
 				}

@@ -64,7 +64,7 @@ func (p *Pool) run(ctx context.Context, id int) {
 		for {
 			job, err := p.deps.Jobs.ClaimNext(ctx)
 			if err != nil {
-				if errors.Is(err, store.ErrNotFound) {
+				if store.IsNotFound(err) {
 					break // nothing queued
 				}
 				if errors.Is(err, context.Canceled) {

@@ -1,3 +1,10 @@
+// Package analysis owns the AC-quality analysis pipeline: prompt
+// construction, the LLM boundary (an interface, not the concrete client),
+// JSON-finding parsing, severity filtering, and label decision.
+//
+// Invariant: this package holds normalized Jira issue content in memory
+// for the duration of a single call to Run, then discards it. Nothing here
+// writes to internal/store; persistence is the worker's responsibility.
 package analysis
 
 import (

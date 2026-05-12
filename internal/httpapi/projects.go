@@ -3,7 +3,6 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -49,21 +48,12 @@ type putConfigRequest struct {
 	ActorAccountID         string   `json:"actorAccountId,omitempty"`
 }
 
-const (
-	auditActionConfigUpdated = "project.config.updated"
-	maxIssueTypes            = 50
-	maxIssueTypeIDLen        = 64
-	maxPromptAddendumBytes   = 1024
-	defaultSeverityThreshold = "medium"
-)
+// auditActionConfigUpdated is the audit-log action token for a successful
+// PUT /v1/projects/{key}/config. Stable string — UI/audit dashboards key
+// off it.
+const auditActionConfigUpdated = "project.config.updated"
 
-func isValidSeverity(s string) bool {
-	switch s {
-	case "info", "low", "medium", "high":
-		return true
-	}
-	return false
-}
+// Validation constants and isValidSeverity live in validation.go.
 
 // defaultConfig is what an installation gets before the admin saves anything.
 // agent_enabled=true matches the migration default — a brand-new project that
@@ -106,7 +96,7 @@ func (h *ProjectsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *ProjectsHandler) handleGet(w http.ResponseWriter, r *http.Request, inst *store.Installation, projectKey string) {
 	cfg, err := h.Projects.GetConfig(r.Context(), inst.ID, projectKey)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
+		if store.IsNotFound(err) {
 			writeJSON(w, http.StatusOK, configToResponse(defaultConfig(projectKey)))
 			return
 		}
@@ -134,7 +124,7 @@ func (h *ProjectsHandler) handlePut(w http.ResponseWriter, r *http.Request, inst
 	// have to round-trip everything — falls back to defaults if no row yet.
 	existing, err := h.Projects.GetConfig(r.Context(), inst.ID, projectKey)
 	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
+		if !store.IsNotFound(err) {
 			h.Logger.Error("projects get config failed before put",
 				"err", err, "cloud_id", inst.CloudID, "project_key", projectKey)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "config lookup failed"})

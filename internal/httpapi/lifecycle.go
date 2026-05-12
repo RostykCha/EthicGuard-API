@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
 
@@ -69,7 +68,7 @@ func (h *LifecycleHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	case "uninstall":
 		if err := h.Installations.DeleteByCloudID(r.Context(), req.CloudID); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
+			if store.IsNotFound(err) {
 				// Idempotent: treat as success so Forge doesn't retry forever.
 				writeJSON(w, http.StatusOK, map[string]string{"status": "not-installed"})
 				return

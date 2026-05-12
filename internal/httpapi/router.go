@@ -1,3 +1,12 @@
+// Package httpapi owns every HTTP route EthicGuard-API exposes and the
+// handlers behind them. Public routes (health, version, lifecycle webhook)
+// sit outside the auth middleware; `/v1/*` feature routes sit behind a
+// Forge-JWT verifier from internal/auth.
+//
+// Invariant: handlers never reach into Postgres directly. They depend on
+// small interfaces (ProjectsRepo, JobsRepo, FindingsRepo, AuditsRepo,
+// PayloadEnqueuer) defined near the consumer; main.go wires the concrete
+// implementations from internal/store at startup.
 package httpapi
 
 import (
