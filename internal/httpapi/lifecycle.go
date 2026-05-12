@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -8,6 +9,14 @@ import (
 	"github.com/ethicguard/ethicguard-api/internal/auth"
 	"github.com/ethicguard/ethicguard-api/internal/store"
 )
+
+// InstallationsRepo is the lifecycle webhook's view of the installations
+// table — narrowed to the two operations it performs. Declared here so tests
+// can substitute a fake; production wiring passes *store.Installations.
+type InstallationsRepo interface {
+	Upsert(ctx context.Context, cloudID, sharedSecret string) (*store.Installation, error)
+	DeleteByCloudID(ctx context.Context, cloudID string) error
+}
 
 // LifecycleHandler serves POST /v1/installations/lifecycle — the webhook the
 // Forge app calls on install and uninstall events. Authentication is a
@@ -20,7 +29,7 @@ import (
 //	}
 type LifecycleHandler struct {
 	Logger          *slog.Logger
-	Installations   *store.Installations
+	Installations   InstallationsRepo
 	InstallerSecret string
 }
 
