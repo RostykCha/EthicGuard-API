@@ -140,6 +140,9 @@ func main() {
 	}
 	if jobsRepo != nil {
 		deps.Jobs = jobsRepo
+		// *store.Jobs also satisfies MetricsRepo (CountCoveredIssues). Wiring it
+		// here keeps the metric handler off the wire when there's no DB in dev.
+		deps.Metrics = jobsRepo
 	}
 	if findingsRepo != nil {
 		deps.Findings = findingsRepo

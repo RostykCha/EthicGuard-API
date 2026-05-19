@@ -58,6 +58,15 @@ const jobsGetByIDSQL = `
 			WHERE id = $1 AND installation_id = $2
 		`
 
+const jobsCountCoveredIssuesSQL = `
+			SELECT COUNT(DISTINCT j.issue_key)
+			FROM jobs j
+			JOIN projects p ON p.id = j.project_id
+			WHERE j.installation_id = $1
+			  AND p.project_key = $2
+			  AND j.status = 'done'
+		`
+
 const jobsLatestForIssueSQL = `
 			SELECT id, installation_id, project_id, issue_key, kind, status,
 			       COALESCE(error, ''), COALESCE(requested_by_account_id, ''),
@@ -258,6 +267,53 @@ func TestJobs_LatestForIssue_NotFound(t *testing.T) {
 	_, err := r.LatestForIssue(context.Background(), 2, "KAN-1")
 	if !IsNotFound(err) {
 		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestJobs_CountCoveredIssues(t *testing.T) {
+	s, mock := newMockStore(t)
+	mock.ExpectQuery(jobsCountCoveredIssuesSQL).
+		WithArgs(int64(42), "KAN").
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(3)))
+
+	r := &Jobs{Store: s}
+	n, err := r.CountCoveredIssues(context.Background(), 42, "KAN")
+	if err != nil {
+		t.Fatalf("CountCoveredIssues: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("n = %d, want 3", n)
+	}
+}
+
+func TestJobs_CountCoveredIssues_Zero(t *testing.T) {
+	// A project that has never been analyzed (or doesn't yet have a projects
+	// row) returns 0, not an error. The metric is defined on the
+	// (installation, project_key) pair regardless of join membership.
+	s, mock := newMockStore(t)
+	mock.ExpectQuery(jobsCountCoveredIssuesSQL).
+		WithArgs(int64(42), "EMPTY").
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(int64(0)))
+
+	r := &Jobs{Store: s}
+	n, err := r.CountCoveredIssues(context.Background(), 42, "EMPTY")
+	if err != nil {
+		t.Fatalf("CountCoveredIssues: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("n = %d, want 0", n)
+	}
+}
+
+func TestJobs_CountCoveredIssues_Error(t *testing.T) {
+	s, mock := newMockStore(t)
+	mock.ExpectQuery(jobsCountCoveredIssuesSQL).
+		WithArgs(int64(42), "KAN").
+		WillReturnError(errors.New("db down"))
+
+	r := &Jobs{Store: s}
+	if _, err := r.CountCoveredIssues(context.Background(), 42, "KAN"); err == nil {
+		t.Fatal("expected error")
 	}
 }
 

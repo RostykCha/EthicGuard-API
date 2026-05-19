@@ -154,6 +154,29 @@ func (r *Jobs) GetByID(ctx context.Context, installationID, jobID int64) (*Job, 
 	return job, nil
 }
 
+// CountCoveredIssues returns the count of distinct issue_keys with at least
+// one done job under (installation, project_key). Returns 0 when none exist
+// or the project row hasn't been upserted yet — the metric is defined over
+// the (installation, project_key) pair, not the projects table membership.
+//
+// Zero-retention: this is a pure aggregate over ids and the status enum.
+// No issue content is read, returned, or logged.
+func (r *Jobs) CountCoveredIssues(ctx context.Context, installationID int64, projectKey string) (int, error) {
+	const q = `
+		SELECT COUNT(DISTINCT j.issue_key)
+		FROM jobs j
+		JOIN projects p ON p.id = j.project_id
+		WHERE j.installation_id = $1
+		  AND p.project_key = $2
+		  AND j.status = 'done'
+	`
+	var n int
+	if err := r.Store.DB.QueryRow(ctx, q, installationID, projectKey).Scan(&n); err != nil {
+		return 0, fmt.Errorf("jobs count covered: %w", err)
+	}
+	return n, nil
+}
+
 // LatestForIssue returns the most recent job for an issue under an
 // installation, or ErrNotFound when the issue has never been analyzed.
 func (r *Jobs) LatestForIssue(ctx context.Context, installationID int64, issueKey string) (*Job, error) {

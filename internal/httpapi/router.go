@@ -31,6 +31,7 @@ type Deps struct {
 	// /v1/analysis/results endpoint. Kept separate from FindingsRepo so the
 	// read-only GET handlers can't accidentally insert.
 	FindingsWriter  PersistedFindingsRepo
+	Metrics         MetricsRepo
 	Queue           PayloadEnqueuer
 	InstallerSecret string
 	JWTAudience     string
@@ -99,6 +100,11 @@ func NewRouter(d Deps) http.Handler {
 		// keep the path-value extraction (`{projectKey}`) in one place.
 		authed.Handle("GET /v1/projects/{projectKey}/config", projectsH)
 		authed.Handle("PUT /v1/projects/{projectKey}/config", projectsH)
+	}
+
+	if d.Metrics != nil {
+		metricsH := &MetricsHandler{Logger: d.Logger, Metrics: d.Metrics}
+		authed.Handle("GET /v1/projects/{projectKey}/metrics", metricsH)
 	}
 
 	if d.Installations != nil {
